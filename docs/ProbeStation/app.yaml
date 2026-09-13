@@ -1,0 +1,324 @@
+# motor_control（APP）寄存器语义清单（给调试 agent 的说明书）
+# 对应固件：motor_control-v1.0（STM32G474，Modbus RTU 从站，地址 0x01）
+# 传输：USART2 9600 8N1；FC03 读保持寄存器（0xE000~0xE02C 连续 45 个（调试段，ProbeStation 规范））
+# 数据格式约定：
+#   - uint32 字段：低 16 在前（0xNNNN=低16，0xNNNN+1=高16），拼 (高<<16)|低
+#   - Q1.15 字段：int16，物理值 = value / 32768.0（范围 [-1,1)）
+#   - 单位：电压 mV、电流 mA、角度 rad、角速度 rad/s（机械）
+
+firmware:
+  name: motor_control
+  version: "1.0.0"
+  description: STM32G474 FOC 电机控制 APP —— 母线/电流 + FOC + SMO + HFI + IF 启动调试寄存器
+  device:
+    name: app
+    unit_id: 1
+
+registers:
+  # ================= 母线电压 & 三相电流（32-bit 物理量） =================
+  - name: vdc_l
+    description: 母线电压 低16位 (mV)
+    address: 0xE000
+    data_type: uint16
+    access: read
+
+  - name: vdc_h
+    description: 母线电压 高16位 (mV)，vdc = (vdc_h<<16)|vdc_l
+    address: 0xE001
+    data_type: uint16
+    access: read
+
+  - name: ia_l
+    description: A 相电流 低16位 (mA)
+    address: 0xE002
+    data_type: uint16
+    access: read
+
+  - name: ia_h
+    description: A 相电流 高16位 (mA)
+    address: 0xE003
+    data_type: uint16
+    access: read
+
+  - name: ib_l
+    description: B 相电流 低16位 (mA)
+    address: 0xE004
+    data_type: uint16
+    access: read
+
+  - name: ib_h
+    description: B 相电流 高16位 (mA)
+    address: 0xE005
+    data_type: uint16
+    access: read
+
+  - name: ic_l
+    description: C 相电流 低16位 (mA)
+    address: 0xE006
+    data_type: uint16
+    access: read
+
+  - name: ic_h
+    description: C 相电流 高16位 (mA)
+    address: 0xE007
+    data_type: uint16
+    access: read
+
+  # ================= FOC 核心（Q1.15） =================
+  - name: theta
+    description: 电角度 (rad, Q1.15，映射 [-π,π])
+    address: 0xE008
+    data_type: int16
+    access: read
+
+  - name: iq
+    description: 反馈电流 Iq (A, Q1.15，基准 13.75A)
+    address: 0xE009
+    data_type: int16
+    access: read
+
+  - name: id
+    description: 反馈电流 Id (A, Q1.15，基准 13.75A)
+    address: 0xE00A
+    data_type: int16
+    access: read
+
+  - name: vq
+    description: 输出电压 Vq (V, Q1.15，基准 24V)
+    address: 0xE00B
+    data_type: int16
+    access: read
+
+  - name: vd
+    description: 输出电压 Vd (V, Q1.15，基准 24V)
+    address: 0xE00C
+    data_type: int16
+    access: read
+
+  - name: valpha
+    description: 输出电压 Vα (V, Q1.15)
+    address: 0xE00D
+    data_type: int16
+    access: read
+
+  - name: vbeta
+    description: 输出电压 Vβ (V, Q1.15)
+    address: 0xE00E
+    data_type: int16
+    access: read
+
+  # ================= SVPWM 输出 =================
+  - name: duty_a
+    description: A 相占空比 (Q1.15)
+    address: 0xE00F
+    data_type: int16
+    access: read
+
+  - name: duty_b
+    description: B 相占空比 (Q1.15)
+    address: 0xE010
+    data_type: int16
+    access: read
+
+  - name: duty_c
+    description: C 相占空比 (Q1.15)
+    address: 0xE011
+    data_type: int16
+    access: read
+
+  - name: sector
+    description: SVPWM 扇区 (1~6)
+    address: 0xE012
+    data_type: uint16
+    access: read
+
+  - name: freq
+    description: 电频率 (Hz)
+    address: 0xE013
+    data_type: uint16
+    access: read
+
+  - name: delta_theta
+    description: 每拍角度增量 (Q1.15)
+    address: 0xE014
+    data_type: int16
+    access: read
+
+  - name: running
+    description: 电机是否运行
+    address: 0xE015
+    data_type: uint16
+    access: read
+    enum:
+      0: 停机
+      1: 运行中
+
+  # ================= SMO 滑模观测器（Q1.15） =================
+  - name: smo_theta
+    description: SMO 估计电角度 (rad, Q1.15)
+    address: 0xE016
+    data_type: int16
+    access: read
+
+  - name: smo_speed
+    description: SMO 估计角速度 (Q1.15，需 ×10430/ts 还原)
+    address: 0xE017
+    data_type: int16
+    access: read
+
+  - name: smo_ealpha
+    description: SMO 反电动势 Eα (V, Q1.15)
+    address: 0xE018
+    data_type: int16
+    access: read
+
+  - name: smo_ebeta
+    description: SMO 反电动势 Eβ (V, Q1.15)
+    address: 0xE019
+    data_type: int16
+    access: read
+
+  - name: smo_emf_mag
+    description: SMO 反电动势幅值 (V, Q1.15)
+    address: 0xE01A
+    data_type: int16
+    access: read
+
+  - name: smo_converged
+    description: SMO 是否收敛
+    address: 0xE01B
+    data_type: uint16
+    access: read
+    enum:
+      0: 未收敛
+      1: 已收敛
+
+  - name: smo_i_err
+    description: SMO 电流误差 (A, Q1.15)
+    address: 0xE01C
+    data_type: int16
+    access: read
+
+  - name: smo_pll_err
+    description: SMO PLL 相位误差 (Q1.15)
+    address: 0xE01D
+    data_type: int16
+    access: read
+
+  # ================= HFI 高频注入（Q1.15） =================
+  - name: hfi_theta
+    description: HFI 估计电角度 (rad, Q1.15)
+    address: 0xE01E
+    data_type: int16
+    access: read
+
+  - name: hfi_speed
+    description: HFI 估计角速度 (Q1.15)
+    address: 0xE01F
+    data_type: int16
+    access: read
+
+  - name: hfi_demod_lpf
+    description: HFI 解调输出 (Q1.15)
+    address: 0xE020
+    data_type: int16
+    access: read
+
+  - name: hfi_iq_filt
+    description: HFI 滤波 Iq (A, Q1.15)
+    address: 0xE021
+    data_type: int16
+    access: read
+
+  - name: hfi_vd_inj
+    description: HFI 注入电压 Vd (V, Q1.15)
+    address: 0xE022
+    data_type: int16
+    access: read
+
+  - name: hfi_converged
+    description: HFI 是否收敛
+    address: 0xE023
+    data_type: uint16
+    access: read
+    enum:
+      0: 未收敛
+      1: 已收敛
+
+  # ================= HFI/SMO 混合 & 状态 =================
+  - name: hfi_weight
+    description: HFI 混合权重 (Q1.15，32768=纯HFI，0=纯SMO)
+    address: 0xE024
+    data_type: uint16
+    access: read
+
+  - name: mc_state
+    description: 电机状态机
+    address: 0xE025
+    data_type: uint16
+    access: read
+    enum:
+      0x00: STANDBY 待机
+      0x01: START 启动
+      0x02: INITIALIZING 初始化
+      0x03: CALIBRATING 校准
+      0x04: IDLE 空闲
+      0x07: TORQUE_CONTROL 转矩闭环
+      0x08: ACCELERATING 加速中
+      0x0A: CONST_SPEED 恒速
+      0x0E: OVERVOLTAGE 过压
+      0x0F: UNDERVOLTAGE 欠压
+      0x10: OVERTEMPERATURE 过温
+      0x11: UNDERTEMPERATURE 欠温
+      0x12: OVERCURRENT 过流
+      0x16: EMERGENCY_STOP 急停
+      0x17: DISABLED 禁用
+
+  - name: mc_fault
+    description: 故障码（0=无故障，非0=故障态对应 mc_state）
+    address: 0xE026
+    data_type: uint16
+    access: read
+
+  - name: mc_mode
+    description: 控制模式
+    address: 0xE027
+    data_type: uint16
+    access: read
+    enum:
+      0: OPEN_LOOP_VF 开环VF
+      1: OPEN_LOOP_IF 开环IF
+      3: TORQUE 转矩
+      4: SPEED 速度
+      5: POSITION 位置
+
+  # ================= IF 启动（Q1.15） =================
+  - name: omega_mech
+    description: 机械角速度 (rad/s，real_speed×327.68，>100rad/s 会溢出)
+    address: 0xE028
+    data_type: int16
+    access: read
+
+  - name: sensorless_gain
+    description: 无感增益 (Q1.15，0=纯开环IF，1=纯SMO；1.0 会溢出显示为 -32768)
+    address: 0xE029
+    data_type: int16
+    access: read
+
+  - name: blended_iq
+    description: IF→SMO 混合后的 Iq 目标 (A, Q1.15，基准 13.75A)
+    address: 0xE02A
+    data_type: int16
+    access: read
+
+  - name: vq_pi_out
+    description: 速度PI输出 Vq (V, Q1.15，基准 24V)
+    address: 0xE02B
+    data_type: int16
+    access: read
+
+  - name: if_iq_ref
+    description: IF 启动恒流 Iq 参考 (A, Q1.15，基准 13.75A；默认 2.06A)
+    address: 0xE02C
+    data_type: int16
+    access: read

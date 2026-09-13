@@ -1,0 +1,8 @@
+{
+    "C_Cpp.default.defines": [
+        "USE_HAL_DRIVER",
+        "USE_FULL_LL_DRIVER",
+        "STM32G474xx"
+    ],
+    "cmake.sourceDirectory": "C:/Users/vmware/Desktop/workspace_github/motor/project_template-threadX-app/rtos/threadx-6.5.1.202602a_rel"
+}

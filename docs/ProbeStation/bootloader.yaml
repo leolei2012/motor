@@ -1,0 +1,154 @@
+# bootloader 寄存器语义清单（给调试 agent 的说明书）
+# 对应固件：bootloader-v1.0（STM32G474，Modbus RTU 从站，地址 0x01）
+# 传输：USART2 9600 8N1；FC03 读保持寄存器，FC41 IAP 升级
+# 地址段：0x0000~0x0004 状态寄存器；0xE000~0xE016 调试寄存器（调试 agent 专用）
+
+firmware:
+  name: bootloader
+  version: "0.1.0"
+  description: STM32G474 bootloader —— Modbus RTU 从站，状态 + 调试寄存器 + OTA(FC41)
+  device:
+    name: bootloader
+    unit_id: 1
+
+registers:
+  # ================= 状态寄存器（0x0000~0x0004） =================
+  - name: state
+    description: 状态机当前状态
+    address: 0x0000
+    data_type: uint16
+    access: read
+    enum:
+      0: IDLE 空闲
+      1: RECEIVING 接收中
+      2: VERIFYING 校验中
+      3: COPYING 搬运中
+      4: COMMITTING 提交中
+      5: DONE 完成
+      6: ERROR 出错
+
+  - name: boot_reason
+    description: 进入 bootloader 的原因
+    address: 0x0001
+    data_type: uint16
+    access: read
+    enum:
+      0: 正常（APP 有效）
+      1: APP 无效
+      2: 强制 IAP
+      3: 无程序（空 META / 首次生产）
+
+  - name: app_valid
+    description: APP 运行槽是否有效
+    address: 0x0002
+    data_type: uint16
+    access: read
+    enum:
+      0: 无效
+      1: 有效
+
+  - name: dl_valid
+    description: 下载槽是否有完整已校验镜像
+    address: 0x0003
+    data_type: uint16
+    access: read
+    enum:
+      0: 无
+      1: 有
+
+  - name: error
+    description: 最近错误码
+    address: 0x0004
+    data_type: uint16
+    access: read
+    enum:
+      0: 无
+      1: CRC 失败
+      2: 范围越界
+      3: FLASH 失败
+      4: 状态错误
+
+  # ================= 调试寄存器（0xE000~0xE016，调试专用） =================
+  - name: dbg_app_addr
+    description: APP 运行槽地址（期望 0x08008000）
+    address: 0xE000
+    data_type: uint32
+    access: read
+
+  - name: dbg_app_size
+    description: APP 大小（期望 0x39800 = 230KB）
+    address: 0xE002
+    data_type: uint32
+    access: read
+
+  - name: dbg_dl_addr
+    description: 下载槽地址（期望 0x08041800）
+    address: 0xE004
+    data_type: uint32
+    access: read
+
+  - name: dbg_dl_size
+    description: 下载槽大小（期望 0x39800）
+    address: 0xE006
+    data_type: uint32
+    access: read
+
+  - name: dbg_meta_addr
+    description: META 页地址（期望 0x0807F800）
+    address: 0xE008
+    data_type: uint32
+    access: read
+
+  - name: dbg_page_size
+    description: flash 页大小（期望 0x800 = 2KB）
+    address: 0xE00A
+    data_type: uint16
+    access: read
+
+  - name: dbg_meta_magic
+    description: META magic（期望 0x4D435031 = "MCP1"）
+    address: 0xE00B
+    data_type: uint32
+    access: read
+
+  - name: dbg_ota_mode
+    description: OTA 模式
+    address: 0xE00D
+    data_type: uint16
+    access: read
+    enum:
+      0: 双槽 copy
+      1: 单槽流式
+
+  - name: dbg_meta_app_size
+    description: META 里记录的 APP 固件长度（0=尚无有效 APP）
+    address: 0xE00E
+    data_type: uint32
+    access: read
+
+  - name: dbg_meta_app_crc32
+    description: META 里记录的 APP 镜像 CRC32
+    address: 0xE010
+    data_type: uint32
+    access: read
+
+  - name: dbg_meta_flags
+    description: META 标志位
+    address: 0xE012
+    data_type: uint16
+    access: read
+    bitfield:
+      - { bit: 0, name: app_valid, desc: APP 已通过校验 }
+      - { bit: 1, name: iap_request, desc: 请求进入 IAP }
+
+  - name: dbg_dl_received
+    description: IAP 下载已收字节数
+    address: 0xE013
+    data_type: uint32
+    access: read
+
+  - name: dbg_dl_total
+    description: IAP 下载总字节数
+    address: 0xE015
+    data_type: uint32
+    access: read

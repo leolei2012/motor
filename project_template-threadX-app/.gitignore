@@ -1,0 +1,53 @@
+# MCAL: 保留提交（含 STM32Cube_FW_G4 vendor SDK）
+# mcal/
+
+# Build output
+build/
+out/
+*.o
+*.a
+*.elf
+*.hex
+*.bin
+*.map
+*.lst
+*.d
+
+# IDE
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+!.vscode/c_cpp_properties.json
+!.vscode/launch.json
+*.uvprojx.bak
+*.uvoptx
+*.uvguix
+*.uvguix.*
+*.dep
+.idea/
+*.eww.bak
+
+# Keil MDK
+DebugConfig/
+RTE/
+Listings/
+Objects/
+Output/
+CodexOutput/
+BuildOutput/
+Project.codex.uvprojx
+project/MDK-ARM/stm32g474vet6/
+JLinkLog.txt
+JLinkSettings.ini
+
+# CMake
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+
+# Toolchain / OS
+*.DS_Store
+Thumbs.db
+*.log
+*.tmp

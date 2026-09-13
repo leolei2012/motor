@@ -1,0 +1,7 @@
+{
+    "C_Cpp.default.defines": [
+        "USE_HAL_DRIVER",
+        "USE_FULL_LL_DRIVER",
+        "STM32G474xx"
+    ]
+}
