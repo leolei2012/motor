@@ -11,16 +11,16 @@
  *  - LED 心跳（app_led_poll，500ms）
  *  - 传感器轮询（drv_ain_sensor_poll，100ms）
  *  - 告警轮询（app_alarm_system_poll，1000ms）
- *  - 电机开环 VF 测试（上电后启动一次，验证 PWM 输出 + 接线）
+ *  - 电机无感电流闭环测试（SMO 观测器估相位，上电后启动一次）
  *
  *  线程入口只做周期调度，业务逻辑在各自模块内。
  *  以 ThreadX 1 个 tick（1ms，TX_TIMER_TICKS_PER_SECOND=1000）为节拍，
  *  用绝对时间戳（HAL_GetTick，ms）判周期。
  */
 
-/** 开环 VF 测试：小电压幅值 + 低转速（安全起步，逐步调大） */
-#define VF_TEST_VOLTAGE     0.05f     /**< 电压幅值（标幺，0.05 = 5% 母线 24V ≈ 1.2V） */
-#define VF_TEST_SPEED_RPM   20.0f     /**< 目标机械转速 rpm */
+/** 开环 IF 测试：电流闭环 + 相位开环（稳定成果，电机平稳正转） */
+#define IF_TEST_CURRENT    1.2f     /**< 电流幅值 A（q 轴电流参考） */
+#define IF_TEST_SPEED_RPM  100.0f   /**< 目标机械转速 rpm */
 
 /** ============================================================
    线程主体
@@ -31,7 +31,7 @@ void app_task_entry(ULONG thread_input)
 
     uint32_t sensor_last = 0u;
     uint32_t alarm_last  = 0u;
-    uint8_t  vf_started  = 0u;
+    uint8_t  if_started  = 0u;
 
     while (1)
     {
@@ -40,13 +40,12 @@ void app_task_entry(ULONG thread_input)
 
         uint32_t now = HAL_GetTick();
 
-        /* —— 电机开环 VF 测试：上电后启动一次（验证 PWM + 接线 + 电流环节拍）—— */
-        if (!vf_started && g_drv.motor != NULL)
+        /* —— 电机开环 IF 测试：电流闭环 + 相位开环（稳定成果）—— */
+        if (!if_started && g_drv.motor != NULL)
         {
-            /* 先设 VF 开环指令，再启动（启动会开 PWM + 使能驱动器） */
-            drv_motor_set_openloop_vf(g_drv.motor, VF_TEST_VOLTAGE, VF_TEST_SPEED_RPM);
+            drv_motor_set_openloop_if(g_drv.motor, IF_TEST_CURRENT, IF_TEST_SPEED_RPM);
             drv_motor_start(g_drv.motor);
-            vf_started = 1u;
+            if_started = 1u;
         }
 
         /* LED 心跳（app 层，500ms 翻转） */

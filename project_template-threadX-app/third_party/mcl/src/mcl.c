@@ -239,7 +239,8 @@ static void mcl_control_tick_foc(mcl *self)
     vbus = self->cfg.bus_voltage;
     if (self->hal->adc_read_bus != NULL)
     {
-        (void)self->hal->adc_read_bus(self->hal_ctx, &vbus, &ic);
+        mcl_scalar ibus;
+        (void)self->hal->adc_read_bus(self->hal_ctx, &vbus, &ibus);
     }
     self->vbus = vbus;
 
@@ -277,8 +278,13 @@ static void mcl_control_tick_foc(mcl *self)
     else /* MCL_MODE_FOC_SENSORLESS */
     {
 #ifndef MCL_DISABLE_OBSERVER
-        /* 观测器（用上一周期电压）估相位，PLL 跟踪 + 估速度 */
-        mcl_observer_update(&self->observer, self->v_alpha_prev, self->v_beta_prev,
+        /* 观测器（用上一周期电压）估相位，PLL 跟踪 + 估速度。
+           注意：观测器接口约定输入为物理量（V、A），而 v_alpha_prev/v_beta_prev
+           是反 Park 输出的归一化电压。SVPWM 幅值不变约定下，归一化 1.0 对应
+           相电压幅值 vbus/√3（线性区最大相电压），故 × vbus/√3 转物理 V。 */
+        mcl_observer_update(&self->observer,
+                            MCL_MUL(self->v_alpha_prev, MCL_MUL(vbus, MCL_FROM_FLOAT(0.5773502692f))),
+                            MCL_MUL(self->v_beta_prev, MCL_MUL(vbus, MCL_FROM_FLOAT(0.5773502692f))),
                             i_alpha, i_beta, self->dt, &phase, NULL);
         mcl_pll_run(&self->pll, phase, self->dt, &phase, &speed);
 
@@ -391,8 +397,10 @@ static void mcl_control_tick_foc(mcl *self)
         }
         else if (self->ol_stage == 1u)
         {
-            /* 自动开环锁定：id 对齐预定位，把转子吸到开环相位 */
-            id_ref = self->cfg.rated_current;
+            /* 自动开环锁定：id 对齐预定位，把转子吸到开环相位。
+               对齐电流用 openloop_drag_q（≈拖动电流），不用 rated_current，
+               避免 4A 级对齐电流触发硬件过流（空载对齐 1A 足够克服齿槽）。 */
+            id_ref = self->cfg.openloop_drag_q;
             iq_ref_loop = (mcl_scalar)0;
         }
         else if (self->ol_stage == 2u)

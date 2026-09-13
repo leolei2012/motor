@@ -18,7 +18,7 @@
 struct drv_motor
 {
     mcl motor;                    /**< mcl 电机对象（算法核心） */
-    mcl_observer_flux observer;   /**< 磁链观测器实例 */
+    mcl_observer_flux observer;   /**< 磁链观测器实例（线性幅值反馈） */
 };
 
 /**
@@ -68,6 +68,15 @@ int drv_motor_set_speed(struct drv_motor *self, float speed_rpm);
 int drv_motor_set_openloop_vf(struct drv_motor *self, float voltage, float speed_rpm);
 
 /**
+ * @brief 开环 IF 旋转电流矢量（相位开环、电流环闭环）
+ * @param self      电机驱动对象
+ * @param current   电流矢量幅值 A（q 轴电流参考，建议 ≤ 额定电流）
+ * @param speed_rpm 目标机械转速 rpm（相位斜坡斜率）
+ * @return 0=成功，-1=失败
+ */
+int drv_motor_set_openloop_if(struct drv_motor *self, float current, float speed_rpm);
+
+/**
  * @brief 电流环控制节拍（在 ADC/PWM 更新中断里以固定频率调用）
  * @param self 电机驱动对象
  */
@@ -79,5 +88,13 @@ void drv_motor_control_isr(struct drv_motor *self);
  * @return 0=成功，-1=失败
  */
 int drv_motor_calibrate_offset(struct drv_motor *self);
+
+/**
+ * @brief 读取电机遥测（观测变量快照，供调试/监控层查询）
+ * @param self 电机驱动对象
+ * @param out  遥测（输出，mcl_telemetry 结构体）
+ * @return 0=成功，-1=失败
+ */
+int drv_motor_get_telemetry(struct drv_motor *self, mcl_telemetry *out);
 
 #endif /* DRV_MOTOR_H */

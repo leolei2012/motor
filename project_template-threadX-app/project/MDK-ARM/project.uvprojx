@@ -540,6 +540,11 @@
               <FileType>1</FileType>
               <FilePath>..\..\middleware\debug_monitor\src\dm_adapter.c</FilePath>
             </File>
+            <File>
+              <FileName>dm_motor.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\..\middleware\debug_monitor\src\dm_motor.c</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>

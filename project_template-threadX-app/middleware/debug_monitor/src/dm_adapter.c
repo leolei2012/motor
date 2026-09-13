@@ -1,5 +1,7 @@
 #include "dm_adapter.h"
 
+#include "dm_motor.h"
+
 /** ---------- Modbus 测试寄存器映射（最小骨架） ---------- */
 
 /** 只读测试段（0xE000 起）：魔数 / 版本 / 自增计数 */
@@ -60,8 +62,11 @@ static struct mb_reg_map s_reg_map =
             .num        = TEST_REG_NUM,
             .data       = s_test_regs,
         },
+        {
+            /* 电机观测段（0x2000 起，只读 float×2 寄存器），由 dm_motor_reg_seg 填充 */
+        },
     },
-    .holding_num  = 2,
+    .holding_num  = 3,
     .input        = {{0, 0, NULL}},
     .input_num    = 0,
 };
@@ -86,6 +91,8 @@ static const dm_adapter s_adapter =
 
 const struct mb_reg_map *dm_adapter_reg_map(void)
 {
+    /* 运行时填充电机观测段（第 3 段，0x2000 起只读） */
+    dm_motor_reg_seg(&s_reg_map.holding[2]);
     return &s_reg_map;
 }
 

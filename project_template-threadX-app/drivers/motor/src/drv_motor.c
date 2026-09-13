@@ -45,6 +45,18 @@
 /* 量程中点（12bit 左对齐 16bit 量程的一半），作为 raw→A 的参考零点 */
 #define CURRENT_ADC_MID         32768.0f
 
+/*
+ * 电流采样方向：
+ *
+ *  三电阻低边采样：采样电阻在绕组与 GND 之间，采到的是「流出电机」的电流，
+ *  而 mcl 约定 ia/ib/ic 为「流入电机为正」。故需反向（mid - raw）才能匹配
+ *  mcl 的 Clarke/Park 约定，电流环才是负反馈。
+ *
+ *  实证：INVERT=0 时 IF 与 SMO 闭环均一上电即硬件过流（电流环正反馈）；
+ *        INVERT=1 时电流环稳定（Iq 精确跟踪设定）。
+ */
+#define CURRENT_ADC_INVERT     1   /**< 1=反向(mid - raw)，匹配 mcl 流入为正约定 */
+
 /* ==================== mcl_hal_ops 回调 ==================== */
 
 /** 读取三相电流（ADC 注入组，左对齐 12bit → 安培，含偏置，零漂由 mcl 校准） */
@@ -56,9 +68,15 @@ static int drv_motor_adc_read_phase(void *ctx, mcl_scalar *ia, mcl_scalar *ib, m
     uint16_t ib_raw = hal_adc1_inj_read_jdr2();  /* V 相 (ADC1 rank2) */
     uint16_t ic_raw = hal_adc2_inj_read_jdr2();  /* W 相 (ADC2 rank2) */
 
+#if CURRENT_ADC_INVERT
+    *ia = (mcl_scalar)(((float)CURRENT_ADC_MID - (float)ia_raw) * CURRENT_ADC_SCALE_A);
+    *ib = (mcl_scalar)(((float)CURRENT_ADC_MID - (float)ib_raw) * CURRENT_ADC_SCALE_A);
+    *ic = (mcl_scalar)(((float)CURRENT_ADC_MID - (float)ic_raw) * CURRENT_ADC_SCALE_A);
+#else
     *ia = (mcl_scalar)(((float)ia_raw - CURRENT_ADC_MID) * CURRENT_ADC_SCALE_A);
     *ib = (mcl_scalar)(((float)ib_raw - CURRENT_ADC_MID) * CURRENT_ADC_SCALE_A);
     *ic = (mcl_scalar)(((float)ic_raw - CURRENT_ADC_MID) * CURRENT_ADC_SCALE_A);
+#endif
 
     return MCL_OK;
 }
@@ -186,6 +204,12 @@ int drv_motor_init(struct drv_motor *self)
     cfg.pll_kp = 55.0f;
     cfg.pll_ki = 11448.0f;
 
+    /* —— 无感自动开环启动参数（VESC 式：锁定 → 斜坡 → 拖动 → 切 SMO 闭环）—— */
+    cfg.openloop_rpm        = 100.0f;         /* 开环拖动转速上限 100rpm（匹配 SMO 已验证能跟上的转速） */
+    cfg.openloop_drag_q     = 2.0f;           /* 开环拖动 q 轴电流 2A（锁定与拖动共用，加强对齐） */
+    cfg.openloop_time_lock  = 0.2f;           /* 锁定对齐时间 0.2s（加长，确保转子可靠对齐到稳定平衡点） */
+    cfg.openloop_seed_angle = 1.5707963f;     /* 90°（π/2）：空载转子超前磁场约 90°，ORTEGA 无额外补偿 */
+
     /* —— 保护阈值（UserData_Motor.h safe 段）—— */
     /*
      * 开环 VF 调试阶段：先禁用所有保护，排除保护误触发导致的"电机不转"。
@@ -200,12 +224,12 @@ int drv_motor_init(struct drv_motor *self)
     cfg.limits.stall_speed  = 1.0f;               /* 堵转转速 rad/s（保守默认） */
     cfg.limits.stall_time   = 0.5f;               /* 堵转时间 0.5s */
 
-    /* 磁链观测器参数（用电机实体参数） */
+    /* 磁链观测器参数：线性幅值反馈（gain 量纲 1/s，100 = 10ms 收敛时间常数） */
     mcl_observer_flux_params op;
-    op.lambda     = cfg.bemf_const;
-    op.resistance = cfg.phase_resistance;
-    op.inductance = cfg.phase_inductance;
-    op.gain       = 100.0f;
+    op.lambda     = cfg.bemf_const;         /* 3.586mWb 永磁磁链 */
+    op.resistance = cfg.phase_resistance;   /* 0.95Ω */
+    op.inductance = cfg.phase_inductance;   /* 1.6mH */
+    op.gain       = 100.0f;                 /* 幅值校正增益（1/s，线性反馈防漂移） */
 
     if (mcl_init(&self->motor, &cfg, &s_mcl_hal, self,
                  &mcl_observer_flux_ops, &self->observer, &op) != MCL_OK)
@@ -216,15 +240,11 @@ int drv_motor_init(struct drv_motor *self)
     mcl_set_mode(&self->motor, MCL_MODE_FOC_SENSORLESS);
 
     /*
-     * 电流零漂动态校准：电机停转、PWM 无输出时采样 256 次平均，
-     * 把器件偏置（1.25V 等）与运放漂移记为 current_offset，
-     * 之后 mcl 每次控制节拍自动减去。
-     * 注意：必须在 mcl_init 之后、且 ADC 已就绪（hal_init 已完成）时调用。
+     * 电流零漂校准不在此处做：init 阶段 TIM1 尚未启动，ADC 注入组未被
+     * TRGO 触发，JDR 读到的都是未转换的垃圾值，校准出的 current_offset
+     * 完全不可信。改在 drv_motor_start() 里「TIM1 已启动(有 TRGO 触发)、
+     * MOE 未使能(电流为 0)」的正确时机采样校准。
      */
-    if (mcl_calibrate_offset(&self->motor) != MCL_OK)
-    {
-        return -1;
-    }
 
     return 0;
 }
@@ -244,13 +264,25 @@ int drv_motor_start(struct drv_motor *self)
     }
 
     /*
-     * 启动硬件时序（参考 ST MCSDK）：
+     * 启动硬件时序（参考 ST MCSDK + 电流零漂校准）：
      *   1. 使能驱动器（M1_EN_DRIVER）
-     *   2. 启动 TIM1 计数器
-     *   3. 使能 PWM 输出（MOE）
+     *   2. 启动 TIM1 计数器（产生 TRGO → 触发 ADC 注入组采样）
+     *   3. 电流零漂校准：此时 TIM1 在跑、ADC 被触发采样，但 MOE 未开、
+     *      PWM 无输出、电机无电流，正好采零漂（256 次平均）
+     *   4. 使能 PWM 输出（MOE）
      */
     drv_output_set(g_drv.output, DRV_OUTPUT_EN_DRIVER, DRV_OUTPUT_ON);
     hal_tim1_start();
+
+    if (drv_motor_calibrate_offset(self) != 0)
+    {
+        /* 校准失败：不输出 PWM，安全停机 */
+        hal_tim1_stop();
+        drv_output_set(g_drv.output, DRV_OUTPUT_EN_DRIVER, DRV_OUTPUT_OFF);
+        mcl_stop(&self->motor);
+        return -1;
+    }
+
     hal_tim1_pwm_enable();
 
     return 0;
@@ -326,6 +358,21 @@ int drv_motor_set_openloop_vf(struct drv_motor *self, float voltage, float speed
     return 0;
 }
 
+int drv_motor_set_openloop_if(struct drv_motor *self, float current, float speed_rpm)
+{
+    if (self == NULL)
+    {
+        return -1;
+    }
+
+    if (mcl_set_openloop_if(&self->motor, (mcl_scalar)current, (mcl_scalar)speed_rpm) != MCL_OK)
+    {
+        return -1;
+    }
+
+    return 0;
+}
+
 void drv_motor_control_isr(struct drv_motor *self)
 {
     if (self == NULL)
@@ -344,6 +391,21 @@ int drv_motor_calibrate_offset(struct drv_motor *self)
     }
 
     if (mcl_calibrate_offset(&self->motor) != MCL_OK)
+    {
+        return -1;
+    }
+
+    return 0;
+}
+
+int drv_motor_get_telemetry(struct drv_motor *self, mcl_telemetry *out)
+{
+    if ((self == NULL) || (out == NULL))
+    {
+        return -1;
+    }
+
+    if (mcl_get_telemetry(&self->motor, out) != MCL_OK)
     {
         return -1;
     }

@@ -175,14 +175,16 @@ static void smo_update(void *impl, mcl_scalar v_alpha, mcl_scalar v_beta,
         mcl_scalar theta = mcl_math_atan2(MCL_NEG(self->e_alpha_final), self->e_beta_final);
         /* 固定相移补偿（AN1078 CONSTANT_PHASE_SHIFT 等价）：
            两级反电动势低通在 Kslf=ω·Ts 时，一级（含 e−E 回喂）滞后 atan(1/2)≈26.57°、
-           二级滞后 atan(1)=45°，合计 atan(3)≈71.57°。该滞后与转速无关（自适应 Kslf），
-           故补偿固定 +71.57°。float +1.24905 rad；定点 +0.19880 圈。 */
+           二级滞后 atan(1)=45°，合计 atan(3)≈71.57°。该滞后与转速无关（自适应 Kslf）。
+
+           实测修正：本工程（INVERT=1 采样 + SMO 输入反向后）仍有 -31.24° 净滞后，
+           来自反电动势角度约定与滤波相移的残余偏差。故补偿调整为 71.57°+31.24°=102.81°。 */
 #if defined(MCL_USE_Q15) || defined(MCL_USE_Q31)
         theta = MCL_ADD(theta, MCL_FROM_FLOAT(0.19880f));
         if (theta > MCL_FROM_FLOAT(0.5f)) { theta = MCL_SUB(theta, MCL_FROM_FLOAT(1.0f)); }
         if (theta < MCL_FROM_FLOAT(-0.5f)) { theta = MCL_ADD(theta, MCL_FROM_FLOAT(1.0f)); }
 #else
-        theta += MCL_FROM_FLOAT(1.24905f);
+        theta += MCL_FROM_FLOAT(1.794373f);   /* +102.81°（71.57° + 31.24° 实测） */
         if (theta > MCL_PI) { theta -= MCL_TWO_PI; }
         if (theta < -MCL_PI) { theta += MCL_TWO_PI; }
 #endif

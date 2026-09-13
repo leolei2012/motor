@@ -88,10 +88,16 @@ static void flux_update(void *impl, mcl_scalar v_alpha, mcl_scalar v_beta,
         self->x2 = MCL_SUB(self->x2, MCL_MUL(uy, corr));
     }
 
-    /* 相位 = atan2(λ_β, λ_α) */
+    /* 相位 = atan2(λ_β, λ_α) + 实测固定偏移补偿。
+       本工程（INVERT=1 采样 + v×vbus/√3）下磁链角度相对真实转子有稳定 -120°
+       偏移（IF 开环 100rpm 实测），来自 v 归一化系数与电流标定的系统性偏差，
+       加 +120° 补偿。 */
     if (phase_rad != NULL)
     {
         *phase_rad = mcl_math_atan2(lambda_beta, lambda_alpha);
+        *phase_rad = MCL_ADD(*phase_rad, MCL_FROM_FLOAT(2.0943951f));  /* +120° */
+        if (*phase_rad > MCL_PI) { *phase_rad = MCL_SUB(*phase_rad, MCL_TWO_PI); }
+        if (*phase_rad < MCL_NEG(MCL_PI)) { *phase_rad = MCL_ADD(*phase_rad, MCL_TWO_PI); }
     }
 
     /* 速度由 PLL 估计，此处不直接输出 */

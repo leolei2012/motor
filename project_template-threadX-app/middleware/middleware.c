@@ -4,13 +4,18 @@
 #include "platform.h"
 #include "tx_api.h"
 
+#include "dm_motor.h"
+
 struct middleware g_middleware;
 
 static struct debug_monitor s_debug_monitor;
 
 int middleware_init(void)
 {
-    /* debug_monitor：绑定调试串口（g_drv.uart）+ 测试寄存器表 */
+    /* 绑定电机数据源（drivers 层 mcl 遥测 → debug_monitor 观测段 0x2000） */
+    dm_motor_bind(g_drv.motor);
+
+    /* debug_monitor：绑定调试串口（g_drv.uart）+ 寄存器表 */
     debug_monitor_init(&s_debug_monitor, 0x01, g_drv.uart);
 
     g_middleware.debug_monitor = &s_debug_monitor;
