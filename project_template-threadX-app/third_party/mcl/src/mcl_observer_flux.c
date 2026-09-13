@@ -88,14 +88,17 @@ static void flux_update(void *impl, mcl_scalar v_alpha, mcl_scalar v_beta,
         self->x2 = MCL_SUB(self->x2, MCL_MUL(uy, corr));
     }
 
-    /* 相位 = atan2(λ_β, λ_α) + 实测固定偏移补偿。
-       本工程（INVERT=1 采样 + v×vbus/√3）下磁链角度相对真实转子有稳定 -120°
-       偏移（IF 开环 100rpm 实测），来自 v 归一化系数与电流标定的系统性偏差，
-       加 +120° 补偿。 */
+    /* 相位 = atan2(λ_β, λ_α) − 90°
+       实测（IF 开环 id=0/iq=1.2A，电流矢量在 θ+90°）：atan2 输出 = θ+167°，
+       即 θ − λ_r = −167°。稳态稳定平衡要求转子磁链位于电流矢量后方、θ 前方：
+       φ ∈ (θ, θ+90°)（力矩 T ∝ sin(γ−φ) 需为正且 dT/dφ<0），
+       且 mcl 配置 openloop_seed_angle=π/2（λ_r = θ+90°，空载转子超前磁场 90°）。
+       故正确输出 λ_r = θ+90°−α（α=负载角，实测 ≈13°），需减 90°：
+       θ+167° − 90° = θ+77° = θ+90°−13°。 */
     if (phase_rad != NULL)
     {
         *phase_rad = mcl_math_atan2(lambda_beta, lambda_alpha);
-        *phase_rad = MCL_ADD(*phase_rad, MCL_FROM_FLOAT(2.0943951f));  /* +120° */
+        *phase_rad = MCL_SUB(*phase_rad, MCL_PI_2);
         if (*phase_rad > MCL_PI) { *phase_rad = MCL_SUB(*phase_rad, MCL_TWO_PI); }
         if (*phase_rad < MCL_NEG(MCL_PI)) { *phase_rad = MCL_ADD(*phase_rad, MCL_TWO_PI); }
     }
@@ -115,10 +118,14 @@ static void flux_seed(void *impl, mcl_scalar flux_alpha, mcl_scalar flux_beta)
         return;
     }
 
-    /* 内部状态 x1/x2 是定子磁链 ψ_s = 转子磁链 λ_r + L*i。
-       seed 给定转子磁链，用上一拍电流近似当前电流换算回定子磁链。 */
-    self->x1 = MCL_ADD(flux_alpha, MCL_MUL(self->params.inductance, self->i_alpha_last));
-    self->x2 = MCL_ADD(flux_beta, MCL_MUL(self->params.inductance, self->i_beta_last));
+    /* 内部约定与输出差 −90°（flux_update 输出 = atan2(λ_β, λ_α) − 90°）。
+       seed API 给的是真实转子磁链 (flux_α, flux_β)，故先旋 +90° 存入内部：
+       (λ_raw_α, λ_raw_β) = (−flux_β, flux_α)，输出即 = 真实磁链角 φ。
+       内部 x1/x2 是定子磁链 ψ_s = λ_raw + L*i（用上一拍电流近似当前）。 */
+    self->x1 = MCL_ADD(MCL_NEG(flux_beta),
+                       MCL_MUL(self->params.inductance, self->i_alpha_last));
+    self->x2 = MCL_ADD(flux_alpha,
+                       MCL_MUL(self->params.inductance, self->i_beta_last));
     self->lambda_est = self->params.lambda;
 }
 

@@ -37,6 +37,7 @@
  * 故不需要在此硬编码偏置电压，漂移也能被动态校正。
  *
  * 标定系数（Rshunt=0.02Ω, Gain=6, Vref=3.3V）：
+ *   增益 = Rf/Rin = 12K/(1K+1K) = 6（-端反馈 12K，-端两个 1K 串联到地）
  *   I = (raw - 32768) / 65536 × 3.3 / (0.02 × 6)
  *     = (raw - 32768) × 0.0004196
  */
@@ -229,7 +230,7 @@ int drv_motor_init(struct drv_motor *self)
     op.lambda     = cfg.bemf_const;         /* 3.586mWb 永磁磁链 */
     op.resistance = cfg.phase_resistance;   /* 0.95Ω */
     op.inductance = cfg.phase_inductance;   /* 1.6mH */
-    op.gain       = 100.0f;                 /* 幅值校正增益（1/s，线性反馈防漂移） */
+    op.gain       = 1000.0f;                /* 幅值校正增益（1/s，增大以加快 λ_r 收敛到 λ） */
 
     if (mcl_init(&self->motor, &cfg, &s_mcl_hal, self,
                  &mcl_observer_flux_ops, &self->observer, &op) != MCL_OK)

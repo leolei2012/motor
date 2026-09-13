@@ -43,10 +43,10 @@ typedef struct
     /**
      * @brief 单步更新，估计转子电气角与速度
      * @param impl        观测器实例
-     * @param v_alpha     α 轴电压 V
-     * @param v_beta      β 轴电压 V
-     * @param i_alpha     α 轴电流 A
-     * @param i_beta      β 轴电流 A
+     * @param v_alpha     α 轴相电压（物理量 V；宿主由母线归一化 v_pu × vbus/2 转换）
+     * @param v_beta      β 轴相电压（物理量 V；同上）
+     * @param i_alpha     α 轴电流（物理量 A，float 模式）
+     * @param i_beta      β 轴电流（物理量 A，float 模式）
      * @param dt          控制周期 s
      * @param phase_rad   估计电气角 rad（输出，归一化到 [-π, π]）
      * @param speed_rad_s 估计速度 rad/s（输出，可为 NULL）

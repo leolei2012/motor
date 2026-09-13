@@ -46,7 +46,10 @@ void mcl_svpwm_run(mcl_scalar v_alpha, mcl_scalar v_beta, mcl_scalar max_duty,
     mcl_scalar vmax;
     mcl_scalar v0;
 
-    /* 反 Clark → 三相电压（每相 [-1, 1]） */
+    /* 反 Clark → 三相电压（每相 [-1, 1]）
+       归一化约定：v_alpha/v_beta 是「母线归一化」（1.0 = 母线 vbus），
+       经下方 da = ((va+v0)*0.5+0.5)*max_duty 的 0.5 映射转为「相电压」
+       （相对中性点，最大 vbus/2）。观测器若需物理相电压，应 × vbus/2。 */
     va = v_alpha;
     vb = MCL_ADD(MCL_MUL(MCL_NEG(v_alpha), MCL_HALF), MCL_MUL(v_beta, MCL_SQRT3_2));
     vc = MCL_SUB(MCL_MUL(MCL_NEG(v_alpha), MCL_HALF), MCL_MUL(v_beta, MCL_SQRT3_2));

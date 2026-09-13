@@ -217,6 +217,13 @@ V_BASE = W_BASE · λ_BASE = R_BASE · I_BASE = L_BASE · W_BASE · I_BASE
 且建议 **V_BASE = V_BUS（母线电压）**，使 SVPWM 的「母线归一化」与 per-unit 电压一致，
 避免额外 scale 转换。
 
+> **「母线归一化」与「相电压」的 2 倍关系（易错）**：
+> mcl 的 v_alpha/v_beta 是**母线归一化**（1.0 = 母线 vbus），SVPWM 内
+> `da = ((va+v0)*0.5+0.5)*max_duty` 的 `0.5` 映射把它转成**相电压**（相对中性点，
+> 最大 vbus/2）。观测器（flux/ortega/smo）接口输入是**相电压物理量 V**，
+> 因此宿主在观测器调用处须 `v_pu × vbus/2` 转换，而非 `× vbus` 或 `× vbus/√3`。
+> 电流环 PID 输出 vd/vq 同样是母线归一化，直接进 SVPWM，无需转换。
+
 > 坑：基值本身（W_BASE、I_BASE、V_BASE）常 >1，**不能存进 Q15/Q31 的 `mcl_scalar`**。
 > 时间归一化用 `T_BASE = 1/W_BASE`（通常 <1，可存定点），`dt_pu = dt/T_BASE`。
 

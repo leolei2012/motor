@@ -279,12 +279,13 @@ static void mcl_control_tick_foc(mcl *self)
     {
 #ifndef MCL_DISABLE_OBSERVER
         /* 观测器（用上一周期电压）估相位，PLL 跟踪 + 估速度。
-           注意：观测器接口约定输入为物理量（V、A），而 v_alpha_prev/v_beta_prev
-           是反 Park 输出的归一化电压。SVPWM 幅值不变约定下，归一化 1.0 对应
-           相电压幅值 vbus/√3（线性区最大相电压），故 × vbus/√3 转物理 V。 */
+           电压归一化约定（统一）：mcl 的 v_alpha/v_beta 是「母线归一化」
+           （1.0 = 母线 vbus，SVPWM 内 da=((va+v0)*0.5+0.5)*max_duty 的 0.5 映射
+           即把母线归一化转到相电压）。观测器接口输入是「相电压物理量 V」，
+           故 v_pu × vbus/2 转物理相电压。 */
         mcl_observer_update(&self->observer,
-                            MCL_MUL(self->v_alpha_prev, MCL_MUL(vbus, MCL_FROM_FLOAT(0.5773502692f))),
-                            MCL_MUL(self->v_beta_prev, MCL_MUL(vbus, MCL_FROM_FLOAT(0.5773502692f))),
+                            MCL_MUL(self->v_alpha_prev, MCL_MUL(vbus, MCL_FROM_FLOAT(0.5f))),
+                            MCL_MUL(self->v_beta_prev, MCL_MUL(vbus, MCL_FROM_FLOAT(0.5f))),
                             i_alpha, i_beta, self->dt, &phase, NULL);
         mcl_pll_run(&self->pll, phase, self->dt, &phase, &speed);
 
