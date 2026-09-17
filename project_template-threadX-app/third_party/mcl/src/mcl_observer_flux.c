@@ -88,20 +88,21 @@ static void flux_update(void *impl, mcl_scalar v_alpha, mcl_scalar v_beta,
         self->x2 = MCL_SUB(self->x2, MCL_MUL(uy, corr));
     }
 
-    /* 相位 = atan2(λ_β, λ_α) − 90°
-       实测（IF 开环 id=0/iq=1.2A，电流矢量在 θ+90°）：atan2 输出 = θ+167°，
-       即 θ − λ_r = −167°。稳态稳定平衡要求转子磁链位于电流矢量后方、θ 前方：
-       φ ∈ (θ, θ+90°)（力矩 T ∝ sin(γ−φ) 需为正且 dT/dφ<0），
-       且 mcl 配置 openloop_seed_angle=π/2（λ_r = θ+90°，空载转子超前磁场 90°）。
-       故正确输出 λ_r = θ+90°−α（α=负载角，实测 ≈13°），需减 90°：
-       θ+167° − 90° = θ+77° = θ+90°−13°。 */
+    /* 相位 = atan2(λ_β, λ_α)（转子磁链角）。
+       历史教训：曾加 −40° 经验修正——实为 R 参数误差（0.46 vs 真值 0.69）
+       造成的稳态角偏差（ΔR·iq/ω/|λ| ≈ 50°），并非采样/调制残差；
+       R 用真值后自然输出即转子磁链，无需任何固定修正角。 */
     if (phase_rad != NULL)
     {
         *phase_rad = mcl_math_atan2(lambda_beta, lambda_alpha);
-        *phase_rad = MCL_SUB(*phase_rad, MCL_PI_2);
-        if (*phase_rad > MCL_PI) { *phase_rad = MCL_SUB(*phase_rad, MCL_TWO_PI); }
-        if (*phase_rad < MCL_NEG(MCL_PI)) { *phase_rad = MCL_ADD(*phase_rad, MCL_TWO_PI); }
     }
+
+    /* 保存本拍电流（seed 换算定子磁链用）。
+       历史 bug：未保存导致 seed 的 L*i_last 恒 0，拖动期间 x = λ_raw 缺
+       L*i，下一拍 λ = x − L*i 被 L*i≈0.006Wb 大幅旋转（vs λ=0.0036），
+       PLL 输入乱跳 → 切闭环必崩（实测拖动期 est−λout=+160° 而非 −90°）。 */
+    self->i_alpha_last = i_alpha;
+    self->i_beta_last = i_beta;
 
     /* 速度由 PLL 估计，此处不直接输出 */
     if (speed_rad_s != NULL)
@@ -118,14 +119,10 @@ static void flux_seed(void *impl, mcl_scalar flux_alpha, mcl_scalar flux_beta)
         return;
     }
 
-    /* 内部约定与输出差 −90°（flux_update 输出 = atan2(λ_β, λ_α) − 90°）。
-       seed API 给的是真实转子磁链 (flux_α, flux_β)，故先旋 +90° 存入内部：
-       (λ_raw_α, λ_raw_β) = (−flux_β, flux_α)，输出即 = 真实磁链角 φ。
-       内部 x1/x2 是定子磁链 ψ_s = λ_raw + L*i（用上一拍电流近似当前）。 */
-    self->x1 = MCL_ADD(MCL_NEG(flux_beta),
-                       MCL_MUL(self->params.inductance, self->i_alpha_last));
-    self->x2 = MCL_ADD(flux_alpha,
-                       MCL_MUL(self->params.inductance, self->i_beta_last));
+    /* 内部状态 x1/x2 是定子磁链 ψ_s = 转子磁链 λ_r + L*i。
+       seed 给定真实转子磁链（输出无修正角，seed 亦无需预旋转）。 */
+    self->x1 = MCL_ADD(flux_alpha, MCL_MUL(self->params.inductance, self->i_alpha_last));
+    self->x2 = MCL_ADD(flux_beta,  MCL_MUL(self->params.inductance, self->i_beta_last));
     self->lambda_est = self->params.lambda;
 }
 

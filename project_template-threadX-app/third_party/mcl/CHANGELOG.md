@@ -9,3 +9,7 @@
 
 ## [Unreleased]
 
+### Added
+
+- 新增架构决策记录 `docs/spec/mcl_adr_precharge.md`：自举电容预充电下沉到 mcl（方案 A：扩展 `mcl_hal_ops` 新增可选回调 `precharge_bootstrap`）。当前仅定案设计，暂不实现。
+

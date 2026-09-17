@@ -25,7 +25,7 @@ struct drv_motor;
 #define DM_MOTOR_REG_BASE 0x2000u
 
 /** 观测段寄存器总数 */
-#define DM_MOTOR_REG_NUM  0x3Eu   /* 0x2000 ~ 0x203D，追加 4 个 SMO 内部状态 float32（0x2036 起） */
+#define DM_MOTOR_REG_NUM  0x150u  /* 0x2000 ~ 0x2049：观测字段；0x2050~0x213F：切换后逐拍采集 cap2 */
 
 /**
  * @brief 绑定电机数据源（drivers 层在 init 时调用）

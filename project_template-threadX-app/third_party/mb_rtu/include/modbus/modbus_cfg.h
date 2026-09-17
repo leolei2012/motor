@@ -36,7 +36,8 @@
 /** @name 寄存器数量上限（用于越界检查） */
 /** @{ */
 #define MB_MAX_READ_COILS  2000  /**< 单次读线圈 / 离散输入数量上限 */
-#define MB_MAX_READ_REGS   63    /**< 单次读寄存器数量上限 */
+#define MB_MAX_READ_REGS   125   /**< 单次读寄存器数量上限（Modbus 规范上限 125；
+                                     电机观测段 0x2000 扩展 R/L 后需 68，原 63 会拒绝整块轮询） */
 #define MB_MAX_WRITE_COILS 1968  /**< 单次写线圈数量上限 */
 #define MB_MAX_WRITE_REGS  50    /**< 单次写寄存器数量上限 */
 /** @} */

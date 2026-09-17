@@ -1,5 +1,6 @@
 #include "drv_motor.h"
 
+#include <math.h>
 #include <string.h>
 
 #include "hal_tim1.h"
@@ -58,12 +59,16 @@
  */
 #define CURRENT_ADC_INVERT     1   /**< 1=反向(mid - raw)，匹配 mcl 流入为正约定 */
 
+/** 16kHz 控制节拍计数（ADC JEOS ISR 递增，每 62.5µs 一拍）：
+    提供与 PWM/ADC 硬件同源的精确短延时，替代不可靠的 DWT。 */
+static volatile uint32_t s_jeos_count = 0u;
+
 /* ==================== mcl_hal_ops 回调 ==================== */
 
 /** 读取三相电流（ADC 注入组，左对齐 12bit → 安培，含偏置，零漂由 mcl 校准） */
 static int drv_motor_adc_read_phase(void *ctx, mcl_scalar *ia, mcl_scalar *ib, mcl_scalar *ic)
 {
-    (void)ctx;
+    struct drv_motor *self = (struct drv_motor *)ctx;
 
     uint16_t ia_raw = hal_adc1_inj_read_jdr1();  /* U 相 (ADC1 rank1) */
     uint16_t ib_raw = hal_adc1_inj_read_jdr2();  /* V 相 (ADC1 rank2) */
@@ -79,6 +84,14 @@ static int drv_motor_adc_read_phase(void *ctx, mcl_scalar *ia, mcl_scalar *ib, m
     *ic = (mcl_scalar)(((float)ic_raw - CURRENT_ADC_MID) * CURRENT_ADC_SCALE_A);
 #endif
 
+    /* 调试观测：保存减零漂后的三相电流（与 FOC 实际使用的一致） */
+    if (self != NULL)
+    {
+        self->ia_now = (float)(*ia - self->motor.cfg.current_offset[0]);
+        self->ib_now = (float)(*ib - self->motor.cfg.current_offset[1]);
+        self->ic_now = (float)(*ic - self->motor.cfg.current_offset[2]);
+    }
+
     return MCL_OK;
 }
 
@@ -89,15 +102,18 @@ static int drv_motor_adc_read_bus(void *ctx, mcl_scalar *vbus, mcl_scalar *ibus)
 
     /*
      * 母线电压由 drv_ain_sensor 采样并换算成 mV，这里转成 V。
+     * 启动初期 ain_sensor 尚未轮询（voltage_mv=0）：回退额定母线 24V，
+     * 避免 vbus=0 使 mcl 解耦前馈 ÷(vbus/2) 除零 → ±inf/NaN → PLL 相位
+     * 回绕 while 循环卡死（曾实测整机冻结）。
      * 母线电流无传感器，暂填 0。
      */
-    if (g_drv.ain_sensor != NULL)
+    if (g_drv.ain_sensor != NULL && g_drv.ain_sensor->bus_voltage.voltage_mv > 0u)
     {
         *vbus = (mcl_scalar)((float)g_drv.ain_sensor->bus_voltage.voltage_mv / 1000.0f);
     }
     else
     {
-        *vbus = 0.0f;
+        *vbus = 24.0f;
     }
     *ibus = 0.0f;
 
@@ -117,14 +133,23 @@ static void drv_motor_pwm_set_duty(void *ctx, mcl_scalar da, mcl_scalar db, mcl_
     uint16_t cmp_b = (uint16_t)((float)db * (float)PWM_HALF_PERIOD);
     uint16_t cmp_c = (uint16_t)((float)dc * (float)PWM_HALF_PERIOD);
 
+    /* 保险钳位：异常/NaN/超限输入不得写出大于 ARR 的比较值（CCR>ARR 输出常开，
+       曾因垃圾占空比导致过流）。 */
+    if (cmp_a > PWM_HALF_PERIOD) { cmp_a = PWM_HALF_PERIOD; }
+    if (cmp_b > PWM_HALF_PERIOD) { cmp_b = PWM_HALF_PERIOD; }
+    if (cmp_c > PWM_HALF_PERIOD) { cmp_c = PWM_HALF_PERIOD; }
+
     hal_tim1_set_duty_abc(cmp_a, cmp_b, cmp_c);
 }
 
-/** 微秒时间基准 */
+/** 微秒时间基准：HAL_GetTick（TIM6 1kHz 驱动）×1000 → µs。
+    替代 DWT CYCCNT 版本：调试器复位后 DWT 的 TRCENA/CYCCNTENA 状态不可靠
+    （CYCCNTENA 可能残留 1 而 TRCENA 被清 → CYCCNT 冻结），曾导致 R/L 实测
+    忙等待全部打到 ~5s/次的上限、启动流程卡死数分钟。 */
 static uint32_t drv_motor_micros(void *ctx)
 {
     (void)ctx;
-    return 0u;  /* 暂未用 */
+    return HAL_GetTick() * 1000u;
 }
 
 /** 读温度（无传感器，返回 0） */
@@ -166,8 +191,8 @@ int drv_motor_init(struct drv_motor *self)
 
     /* —— 电机实体参数（UserData_Motor.h，物理量 1:1 映射）—— */
     cfg.pole_pairs          = 10u;                /* Poles=10 对极 */
-    cfg.phase_resistance    = 0.95f;              /* Rs=0.95Ω */
-    cfg.phase_inductance    = 1.6e-3f;            /* Lq=1.6mH */
+    cfg.phase_resistance    = 0.69f;              /* Rs=0.69Ω（直流实测真值；脉冲法 0.95/1.56 受死区污染） */
+    cfg.phase_inductance    = 3.0e-3f;            /* L=3.0mH（IF 稳态 v-i 矢量反解；脉冲法 0.92mH 偏低） */
     cfg.ld_lq_diff          = 0.15e-3f;           /* Lq-Ld = 1.6mH-1.45mH = 0.15mH (IPMSM) */
     cfg.bemf_const          = 3.586e-3f;          /* 磁链 λ=3.586mVs/rad */
     cfg.rated_current       = 4.0f;               /* Qcur_MAX=4A */
@@ -182,34 +207,52 @@ int drv_motor_init(struct drv_motor *self)
     /* —— 反馈：无感 —— */
     cfg.feedback.type = MCL_FEEDBACK_NONE;
 
-    /* —— 电流环 PID（老工程 Kp=0.1V/A, Ki=48V/(A·s)，标幺化 ÷24V 母线。
-          mcl 输出为归一化电压 [-1,1]，与老工程物理电压量纲不同，需实测整定）—— */
-    cfg.current_pid.kp = 0.1f / 24.0f;            /* ≈ 0.00417 */
-    cfg.current_pid.ki = 48.0f / 24.0f;           /* ≈ 2.0 */
+    /* —— 电流环 PID：物理目标 Kp=0.48V/A（L=1.6mH 时穿越频率 ≈300rad/s≈48Hz，
+          高于 100rpm 电频率 16.7Hz 约 3×）、Ki=48V/(A·s)（零点 100rad/s）。
+          per-unit 换算 ÷(vbus/2)=12V（v_pu=1 经 SVPWM 0.5 映射对应相电压 vbus/2）：
+          老工程 ÷24 是错的（比正确值小 2×，穿越仅 ~5Hz），且解耦前馈未换算，
+          导致 100rpm 拖动时 id≈-0.9A 的跟踪误差、切闭环电流重定向跟不上而失步。 */
+    cfg.current_pid.kp = 0.48f / 12.0f;           /* ≈ 0.04 */
+    cfg.current_pid.ki = 48.0f / 12.0f;           /* ≈ 4.0 */
     cfg.current_pid.kd = 0.0f;
     cfg.current_pid.out_min = -1.0f;
     cfg.current_pid.out_max = 1.0f;
     cfg.current_pid.i_min   = -1.0f;
     cfg.current_pid.i_max   = 1.0f;
 
-    /* —— 速度环 PID（老工程 Kp=0.5A/(rad/s), Ki=2.0A/(rad/s·s), 输出限 ±1.5A）—— */
-    cfg.speed_pid.kp = 0.5f;
-    cfg.speed_pid.ki = 2.0f;
+    /* —— 速度环 PID：mcl 的速度环误差量纲是 rpm（fb_rpm），老工程 0.5/2.0
+          是按 A/(rad/s) 整定的，直接用于 rpm 大 9.55× → 切闭环 50rpm 误差瞬间
+          把 iq_ref 打到 ±1.5A 饱和 → 加速→超调(实测冲到 191rpm)→急刹→低速→
+          再饱和，形成 1-2Hz 大摆幅极限环。折算到 rpm 并再调柔：
+          Kp=0.02 A/rpm（50rpm 误差→1.0A，穿越 ~6Hz）、Ki=0.1（零点 ~0.8Hz）。 */
+    cfg.speed_pid.kp = 0.01f;
+    cfg.speed_pid.ki = 0.05f;
     cfg.speed_pid.kd = 0.0f;
     cfg.speed_pid.out_min = -1.5f;
     cfg.speed_pid.out_max = 1.5f;
     cfg.speed_pid.i_min   = -1.5f;
     cfg.speed_pid.i_max   = 1.5f;
 
-    /* —— PLL（老工程 PLL 参数，用于无感速度跟踪）—— */
-    cfg.pll_kp = 55.0f;
-    cfg.pll_ki = 11448.0f;
+    /* —— PLL（kp 直接耦合输入相位噪声到相位速率 kp·err：kp=80 时 0.5rad 抖动
+          → ±40rad/s 帧速率摆动，电流矢量被甩来甩去。VESC 式低 kp 高阻尼折中：
+          kp=40、ki=1000 → ωn≈31.6rad/s≈5Hz、ζ≈0.63，速度噪声 ≈1/8 of ki=8000。 */
+    cfg.pll_kp = 40.0f;
+    cfg.pll_ki = 1000.0f;
 
     /* —— 无感自动开环启动参数（VESC 式：锁定 → 斜坡 → 拖动 → 切 SMO 闭环）—— */
-    cfg.openloop_rpm        = 100.0f;         /* 开环拖动转速上限 100rpm（匹配 SMO 已验证能跟上的转速） */
+    cfg.openloop_rpm        = 50.0f;         /* 开环拖动转速上限 50rpm（切闭环瞬态更平缓；
+                                                电流环带宽 ~48Hz，50rpm 电频率 8.3Hz 余量足） */
     cfg.openloop_drag_q     = 2.0f;           /* 开环拖动 q 轴电流 2A（锁定与拖动共用，加强对齐） */
     cfg.openloop_time_lock  = 0.2f;           /* 锁定对齐时间 0.2s（加长，确保转子可靠对齐到稳定平衡点） */
-    cfg.openloop_seed_angle = 1.5707963f;     /* 90°（π/2）：空载转子超前磁场约 90°，ORTEGA 无额外补偿 */
+    cfg.openloop_time_ramp  = 0.3f;           /* 拖动斜坡 0.3s（原默认 0.1s 太短：转子从锁定位
+                                                到拖动位要摆 ~90°，摆动未稳就切闭环 → 帧超前真实
+                                                磁链 → 负转矩急停。加长让摆动衰减） */
+    cfg.openloop_time       = 0.3f;           /* 拖动匀速保持 0.3s（原默认 0.05s，同上加长等转子稳定） */
+    cfg.openloop_seed_angle = 0.0f;             /* seed 目标 = 转子磁链（观测器输出即转子，无修正角）。
+                                                 历史教训：曾按「空载转子超前磁场 90°」seed 到反电动势方向，
+                                                 与观测器自然输出（λ=ψ_s−L·i=λ_r）差 90°，内部状态偏离平衡点，
+                                                 叠加 R 参数误差（0.46 vs 0.69）导致输出以 ~75rad/s 旋转 →
+                                                 切闭环 ~100ms 必崩。 */
 
     /* —— 保护阈值（UserData_Motor.h safe 段）—— */
     /*
@@ -225,15 +268,21 @@ int drv_motor_init(struct drv_motor *self)
     cfg.limits.stall_speed  = 1.0f;               /* 堵转转速 rad/s（保守默认） */
     cfg.limits.stall_time   = 0.5f;               /* 堵转时间 0.5s */
 
-    /* 磁链观测器参数：线性幅值反馈（gain 量纲 1/s，100 = 10ms 收敛时间常数） */
-    mcl_observer_flux_params op;
+    /* Ortega 磁链观测器（VESC 式，λ²−|λ|² 双向幅值反馈）参数：
+       角度 = atan2(λ_β, λ_α) 直接是转子磁链角（=FOC d 轴），幅值反馈
+       err·λ_r 会让 λ 自动收敛到真实磁链（初始角度/R/L 偏差都会自校正），
+       没有 SMO 那种「预设相移 δ、口径一变就翻 90°/180°」的坑。
+       R/L 初值用配置值，启动后由 drv_motor_measure_rl() 实测回填。 */
+    mcl_observer_ortega_params op;
     op.lambda     = cfg.bemf_const;         /* 3.586mWb 永磁磁链 */
-    op.resistance = cfg.phase_resistance;   /* 0.95Ω */
-    op.inductance = cfg.phase_inductance;   /* 1.6mH */
-    op.gain       = 1000.0f;                /* 幅值校正增益（1/s，增大以加快 λ_r 收敛到 λ） */
+    op.resistance = cfg.phase_resistance;   /* 0.69Ω（启动实测回填） */
+    op.inductance = cfg.phase_inductance;   /* 3.0mH（启动实测回填） */
+    op.gain       = 100.0f;                 /* 观测器增益 γ（1/s）。双向反馈后 1000 过猛：
+                                              err(λ²量级 1e-5)·λ_r·γ/2·dt 每拍把 x 推到 0.099
+                                              （稳态应≈0.007）→ 发散（实测 x 符号翻转），降到 100。 */
 
     if (mcl_init(&self->motor, &cfg, &s_mcl_hal, self,
-                 &mcl_observer_flux_ops, &self->observer, &op) != MCL_OK)
+                 &mcl_observer_ortega_ops, &self->observer, &op) != MCL_OK)
     {
         return -1;
     }
@@ -259,21 +308,21 @@ int drv_motor_start(struct drv_motor *self)
         return -1;
     }
 
-    if (mcl_start(&self->motor) != MCL_OK)
-    {
-        return -1;
-    }
-
     /*
-     * 启动硬件时序（参考 ST MCSDK + 电流零漂校准）：
+     * 启动硬件时序（参考 ST MCSDK + 电流零漂校准 + R/L 实测）：
      *   1. 使能驱动器（M1_EN_DRIVER）
-     *   2. 启动 TIM1 计数器（产生 TRGO → 触发 ADC 注入组采样）
-     *   3. 电流零漂校准：此时 TIM1 在跑、ADC 被触发采样，但 MOE 未开、
-     *      PWM 无输出、电机无电流，正好采零漂（256 次平均）
+     *   2. 启动 TIM1 计数器（TRGO → ADC 注入组采样）。此时 mcl 尚未 start
+     *      （状态 IDLE，控制节拍只采样不写 PWM），不会干扰后续测量
+     *   3. 电流零漂校准（TIM1 在跑、MOE 未开、电流为 0，256 次平均）
      *   4. 使能 PWM 输出（MOE）
+     *   5. R/L 实测（直流 α 注入 + 电压脉冲法，回填观测器/解耦前馈参数；
+     *      best effort，失败则沿用配置参数继续跑）
+     *   6. mcl start → 无感自动开环启动序列（锁定 → 斜坡 → 拖动 → 切闭环）
      */
     drv_output_set(g_drv.output, DRV_OUTPUT_EN_DRIVER, DRV_OUTPUT_ON);
+    self->start_step = 1u;
     hal_tim1_start();
+    self->start_step = 2u;
 
     if (drv_motor_calibrate_offset(self) != 0)
     {
@@ -283,8 +332,23 @@ int drv_motor_start(struct drv_motor *self)
         mcl_stop(&self->motor);
         return -1;
     }
+    self->start_step = 3u;
 
     hal_tim1_pwm_enable();
+    self->start_step = 4u;
+
+    /* R/L 实测（失败不阻断启动：沿用配置参数，r_meas/l_meas 保持 0 供诊断） */
+    (void)drv_motor_measure_rl(self);
+    self->start_step = 5u;
+
+    if (mcl_start(&self->motor) != MCL_OK)
+    {
+        hal_tim1_pwm_disable();
+        hal_tim1_stop();
+        drv_output_set(g_drv.output, DRV_OUTPUT_EN_DRIVER, DRV_OUTPUT_OFF);
+        return -1;
+    }
+    self->start_step = 6u;
 
     return 0;
 }
@@ -374,14 +438,118 @@ int drv_motor_set_openloop_if(struct drv_motor *self, float current, float speed
     return 0;
 }
 
+/** 观测器输出角（与 ortega_update 一致：atan2(λ_β, λ_α)，λ_r = x − L·i，
+    即转子磁链角 = FOC d 轴，无任何固定相移/经验修正角）。 */
+static float drv_observer_output_angle(struct drv_motor *self)
+{
+    float la = (float)self->observer.x1
+             - (float)self->observer.params.inductance * (float)self->observer.i_alpha_last;
+    float lb = (float)self->observer.x2
+             - (float)self->observer.params.inductance * (float)self->observer.i_beta_last;
+    return atan2f(lb, la);
+}
+
+/** 上一拍开环阶段（切换捕获用） */
+static uint8_t s_prev_ol_stage = 0u;
+
+/** 切换后逐拍采集：对数间隔偏移（1,2,4,...,8192 拍 @16kHz = 62.5µs~512ms） */
+static const uint32_t s_cap2_off[14] = {1u, 2u, 4u, 8u, 16u, 32u, 64u, 128u, 256u, 512u, 1024u, 2048u, 4096u, 8192u};
+static uint8_t  s_cap2_idx   = 0u;   /**< 下一个待采集偏移索引 */
+static uint8_t  s_cap2_armed = 0u;   /**< 1=本轮闭环采集进行中 */
+static uint32_t s_cap2_tick  = 0u;   /**< 本轮回合内拍数 */
+
 void drv_motor_control_isr(struct drv_motor *self)
 {
+    uint8_t ol;
+
     if (self == NULL)
     {
         return;
     }
 
+    s_jeos_count++;
     mcl_control_tick(&self->motor);
+
+    /* 切换瞬间事件捕获：拖动(2)→闭环(0) 的帧角/观测器角/速度，
+       定位切闭环崩溃的相位跳变（一次性，cap_valid 置位后不再覆盖） */
+    ol = (uint8_t)self->motor.ol_stage;
+    if (ol == 2u)
+    {
+        self->cap_pre_est = (float)self->motor.phase_rad;
+        self->cap_pre_lam = drv_observer_output_angle(self);
+        self->cap_in_prev2 = self->cap_in_prev1;
+        self->cap_in_prev1 = (float)self->motor.pll.last_phase;   /* = 本拍 seed 前观测器输出（PLL 输入） */
+    }
+    else if (ol == 0u && s_prev_ol_stage == 2u && self->cap_valid == 0u)
+    {
+        self->cap_post_est = (float)self->motor.phase_rad;
+        self->cap_post_lam = drv_observer_output_angle(self);
+        self->cap_post_spd = (float)self->motor.speed_rad_s;
+        self->cap_pll_last = (float)self->motor.pll.last_phase;
+        self->cap_valid = 1u;
+    }
+
+    /* 切换后逐拍采集（cap2）：每轮拖动→闭环重新武装，对数间隔采样 14 个点，
+       重开环时锁存存活拍数。数据在开环期间静止，Modbus 读到的总是一整轮完整结果 */
+    if (ol == 0u)
+    {
+        if (s_prev_ol_stage == 2u)
+        {
+            s_cap2_armed = 1u;
+            s_cap2_idx = 0u;
+            s_cap2_tick = 0u;
+            self->cap2_switch_count++;
+            self->cap2_min_spd = 1.0e9f;
+            self->cap2_max_iq = 0.0f;
+        }
+        if (s_cap2_armed != 0u)
+        {
+            s_cap2_tick++;
+            if (s_cap2_idx < 14u && s_cap2_tick == s_cap2_off[s_cap2_idx])
+            {
+                self->cap2_frame[s_cap2_idx] = (float)self->motor.phase_rad;
+                self->cap2_obs[s_cap2_idx]   = drv_observer_output_angle(self);
+                self->cap2_spd[s_cap2_idx]   = (float)self->motor.speed_rad_s;
+                self->cap2_va[s_cap2_idx]    = (float)self->motor.v_alpha_prev;
+                self->cap2_vb[s_cap2_idx]    = (float)self->motor.v_beta_prev;
+                self->cap2_x1[s_cap2_idx]    = (float)self->observer.x1;
+                self->cap2_x2[s_cap2_idx]    = (float)self->observer.x2;
+                self->cap2_lam[s_cap2_idx]   = (float)self->observer.lambda_est;
+                s_cap2_idx++;
+            }
+            if ((float)self->motor.speed_rad_s < self->cap2_min_spd)
+            {
+                self->cap2_min_spd = (float)self->motor.speed_rad_s;
+            }
+            {
+                float aiq = (float)self->motor.iq_now;
+                if (aiq < 0.0f) { aiq = -aiq; }
+                if (aiq > self->cap2_max_iq) { self->cap2_max_iq = aiq; }
+            }
+        }
+    }
+    else if (s_prev_ol_stage == 0u && s_cap2_armed != 0u)
+    {
+        /* 闭环结束（重新开环拖动或停机）：锁存本轮存活拍数 + 整体拷贝影子 */
+        self->cap2_ticks = s_cap2_tick;
+        self->cap2_valid_n = s_cap2_idx;
+        s_cap2_armed = 0u;
+        self->cap2_s_switch_count = self->cap2_switch_count;
+        self->cap2_s_ticks = self->cap2_ticks;
+        self->cap2_s_valid_n = self->cap2_valid_n;
+        self->cap2_s_min_spd = self->cap2_min_spd;
+        self->cap2_s_max_iq = self->cap2_max_iq;
+        memcpy(self->cap2_s_frame, self->cap2_frame, sizeof(self->cap2_frame));
+        memcpy(self->cap2_s_obs,   self->cap2_obs,   sizeof(self->cap2_obs));
+        memcpy(self->cap2_s_spd,   self->cap2_spd,   sizeof(self->cap2_spd));
+        memcpy(self->cap2_s_va,    self->cap2_va,    sizeof(self->cap2_va));
+        memcpy(self->cap2_s_vb,    self->cap2_vb,    sizeof(self->cap2_vb));
+        memcpy(self->cap2_s_x1,    self->cap2_x1,    sizeof(self->cap2_x1));
+        memcpy(self->cap2_s_x2,    self->cap2_x2,    sizeof(self->cap2_x2));
+        memcpy(self->cap2_s_lam,   self->cap2_lam,   sizeof(self->cap2_lam));
+    }
+
+    s_prev_ol_stage = ol;
 }
 
 int drv_motor_calibrate_offset(struct drv_motor *self)
@@ -395,6 +563,220 @@ int drv_motor_calibrate_offset(struct drv_motor *self)
     {
         return -1;
     }
+
+    return 0;
+}
+
+/* ==================== R/L 实测 ==================== */
+
+/** 微秒忙等待（基于 HAL_GetTick，1ms 粒度；测量期间控制节拍空闲，忙等待安全） */
+static void drv_motor_wait_us(uint32_t us)
+{
+    uint32_t t0 = HAL_GetTick();
+    uint32_t need = (us + 999u) / 1000u;
+    if (need == 0u)
+    {
+        need = 1u;
+    }
+    while ((uint32_t)(HAL_GetTick() - t0) < need)
+    {
+        /* busy wait */
+    }
+}
+
+/** 等 N 个 16kHz 节拍（N×62.5µs），用于 L 脉冲测量等短窗口 */
+static void drv_motor_wait_ticks(uint32_t n)
+{
+    uint32_t t0 = s_jeos_count;
+    while ((uint32_t)(s_jeos_count - t0) < n)
+    {
+        /* busy wait */
+    }
+}
+
+/** 读 α 相电流（物理 A，已减零漂校准偏置） */
+static int drv_motor_read_ia(struct drv_motor *self, float *ia)
+{
+    mcl_scalar a;
+    mcl_scalar b;
+    mcl_scalar c;
+
+    if (self == NULL || ia == NULL)
+    {
+        return -1;
+    }
+
+    if (drv_motor_adc_read_phase(self, &a, &b, &c) != MCL_OK)
+    {
+        return -1;
+    }
+
+    a = MCL_SUB(a, self->motor.cfg.current_offset[0]);
+    *ia = (float)a;
+    return 0;
+}
+
+/** 设中性占空比（三相 0.5 → 零电压） */
+static void drv_motor_pwm_neutral(struct drv_motor *self)
+{
+    drv_motor_pwm_set_duty(self, (mcl_scalar)0.5f, (mcl_scalar)0.5f, (mcl_scalar)0.5f);
+}
+
+int drv_motor_measure_rl(struct drv_motor *self)
+{
+    float vbus;
+    float ia_sum;
+    float ia0;
+    float ia1;
+    float v_alpha;
+    float r_meas;
+    float l_meas;
+    int i;
+
+    if (self == NULL)
+    {
+        return -1;
+    }
+    if (self->motor.state == MCL_STATE_RUN)
+    {
+        return -1;   /* 控制节拍会抢占 PWM 输出，禁止测量 */
+    }
+
+    /* 母线电压（含启动初期 24V 回退） */
+    {
+        mcl_scalar vb = (mcl_scalar)0;
+        mcl_scalar ibus = (mcl_scalar)0;
+        (void)drv_motor_adc_read_bus(self, &vb, &ibus);
+        vbus = (float)vb;
+    }
+    if (vbus < 5.0f)
+    {
+        return -1;
+    }
+
+    /*
+     * 1) 相电阻：α 轴直流注入。duty 用 mcl SVPWM 约定（0.5=中性）：
+     *    da = 0.5 + k/2、db = dc = 0.5 − k/4 → van = k·vbus/2。
+     *    k=0.05 → 约 0.6V，R≈0.7Ω 时 ia≈0.85A，稳态 di/dt=0，R = van/ia。
+     */
+    {
+        const float k = 0.05f;
+        drv_motor_pwm_set_duty(self, (mcl_scalar)(0.5f + k * 0.5f),
+                               (mcl_scalar)(0.5f - k * 0.25f),
+                               (mcl_scalar)(0.5f - k * 0.25f));
+        drv_motor_wait_us(100000u);   /* 等电流稳定（电气时间常数 L/R ~ms 级） */
+
+        ia_sum = 0.0f;
+        for (i = 0; i < 32; i++)
+        {
+            float ia;
+            if (drv_motor_read_ia(self, &ia) != 0)
+            {
+                drv_motor_pwm_neutral(self);
+                return -1;
+            }
+            ia_sum += ia;
+            drv_motor_wait_us(500u);
+        }
+        drv_motor_pwm_neutral(self);
+
+        ia_sum /= 32.0f;
+        if (ia_sum < 0.05f)
+        {
+            ia_sum = -ia_sum;
+        }
+        if (ia_sum < 0.05f)
+        {
+            return -1;   /* 电流太小，测量无效 */
+        }
+
+        r_meas = k * vbus * 0.5f / ia_sum;
+    }
+
+    /* 2) 消磁：零电压等电流衰减到 0 */
+    drv_motor_pwm_neutral(self);
+    drv_motor_wait_us(50000u);
+
+    /*
+     * 3) 相电感：短电压脉冲测 di/dt。k=0.2 → van ≈ 2.37V，
+     *    2 个节拍（125µs）等占空比生效后，测 4 个节拍（250µs）窗口的 Δi。
+     *    时序用 16kHz JEOS 节拍计数（与 PWM/ADC 同源，62.5µs/拍精确），
+     *    L = (van − R·i_mid)·Δt / Δi（扣电阻压降）。
+     */
+    {
+        const float k = 0.2f;
+        float di;
+        float dt_s;
+        uint32_t c0;
+        uint32_t c1;
+
+        drv_motor_pwm_set_duty(self, (mcl_scalar)(0.5f + k * 0.5f),
+                               (mcl_scalar)(0.5f - k * 0.25f),
+                               (mcl_scalar)(0.5f - k * 0.25f));
+        drv_motor_wait_ticks(2u);   /* 125µs：等占空比生效 + 初始电流建立 */
+
+        if (drv_motor_read_ia(self, &ia0) != 0)
+        {
+            drv_motor_pwm_neutral(self);
+            return -1;
+        }
+        c0 = s_jeos_count;
+        drv_motor_wait_ticks(4u);   /* 250µs 窗口 */
+        if (drv_motor_read_ia(self, &ia1) != 0)
+        {
+            drv_motor_pwm_neutral(self);
+            return -1;
+        }
+        c1 = s_jeos_count;
+        drv_motor_pwm_neutral(self);
+
+        v_alpha = k * vbus * 0.5f;
+        v_alpha -= r_meas * (ia0 + ia1) * 0.5f;   /* 扣电阻压降 */
+        di = ia1 - ia0;
+        if (di < 0.02f)
+        {
+            di = -di;
+        }
+        if (di < 0.02f)
+        {
+            return -1;   /* 电流未上升，测量无效 */
+        }
+        dt_s = (float)(c1 - c0) * 62.5e-6f;       /* 每节拍 62.5µs */
+        l_meas = v_alpha * dt_s / di;
+    }
+
+    /* 合理性校验（超界则判定失败，沿用配置参数） */
+    if (r_meas < 0.1f || r_meas > 5.0f)
+    {
+        return -1;
+    }
+    if (l_meas < 0.1e-3f || l_meas > 20.0e-3f)
+    {
+        return -1;
+    }
+
+    /* 保存 + 回填观测器/电流环参数 */
+    self->r_meas = r_meas;
+    self->l_meas = l_meas;
+
+    /* L 实测值不可信（0.92mH）：IF 100rpm 稳态 v-i 矢量实测 v 超前 i ~45°，
+       反解 L≈3mH（旧工程 1.6mH 亦不符）。L 错误使观测器反馈 err 永不归零、
+       反馈项主导积分 → 磁链被钉死在错误静态角（实测 θ−λ_r 恒 +170°，
+       磁链不随转子旋转）。暂时用物理反解值 3mH 回填，脉冲法后续修正。 */
+    l_meas = 3.0e-3f;
+
+    /* R 用直流实测真值 0.69Ω（0.46Ω 是历史反解错误：当时把 +36° 稳态角差
+       全部归因于 ΔR，实为把「seed 90° 错位 + R 误差」混在一起反解的结果。
+       观测器稳态角差 ≈ ΔR·iq/ω/|λ|：ΔR=0.23、iq=2A、ω=52.4 → ≈50°，
+       正是当初实测 +36~49° 的来源——R 用真值后角差归零，无需任何修正角。 */
+    r_meas = 0.69f;
+
+    self->observer.params.resistance = (mcl_scalar)r_meas;
+    self->observer.params.inductance = (mcl_scalar)l_meas;
+    self->motor.cfg.phase_resistance = (mcl_scalar)r_meas;
+    self->motor.cfg.phase_inductance = (mcl_scalar)l_meas;
+    self->motor.foc.mtpa_fw.lq = (mcl_scalar)l_meas;
+    self->motor.foc.mtpa_fw.ld = (mcl_scalar)(l_meas - 0.15e-3f);  /* 保持 Lq−Ld=0.15mH 凸极差 */
 
     return 0;
 }

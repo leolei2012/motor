@@ -44,17 +44,30 @@ void mcl_foc_run(mcl_foc *self, mcl_scalar id, mcl_scalar iq,
         return;
     }
 
-    (void)vbus;  /* 弱磁在 mcl_mtpa_fw_id_ref 中处理，此处预留 */
-
     /* d/q 轴电流 PI */
     vd_pi = mcl_pid_run(&self->pid_d, MCL_SUB(id_ref, id), dt);
     vq_pi = mcl_pid_run(&self->pid_q, MCL_SUB(iq_ref, iq), dt);
 
     /* 解耦前馈（稳态）：
        Vd_ff = -ω·Lq·iq
-       Vq_ff = ω·(Ld·id + λ) */
-    vd_ff = MCL_NEG(MCL_MUL(MCL_MUL(speed, self->mtpa_fw.lq), iq));
-    vq_ff = MCL_MUL(speed, MCL_ADD(MCL_MUL(self->mtpa_fw.ld, id), self->mtpa_fw.lambda));
+       Vq_ff = ω·(Ld·id + λ)
+       上式为物理相电压 V。mcl 的 vd/vq 是「母线归一化」per-unit（1.0 = vbus），
+       SVPWM 经 0.5 映射到相电压（相对中性点，最大 vbus/2），
+       故前馈物理 V 须 ÷(vbus/2) 转 per-unit，否则前馈按 12× 过强施加、
+       PI 积分被迫扛大偏置（实测 IF 开环拖动中 vd_pi≈+0.43、vq_pi≈-0.25）。
+       vbus 过小（未采样/断线）时跳过前馈，防除零产生 ±inf。 */
+    if (vbus > MCL_FROM_FLOAT(1.0f))
+    {
+        vd_ff = MCL_DIV(MCL_NEG(MCL_MUL(MCL_MUL(speed, self->mtpa_fw.lq), iq)),
+                        MCL_MUL(vbus, MCL_FROM_FLOAT(0.5f)));
+        vq_ff = MCL_DIV(MCL_MUL(speed, MCL_ADD(MCL_MUL(self->mtpa_fw.ld, id), self->mtpa_fw.lambda)),
+                        MCL_MUL(vbus, MCL_FROM_FLOAT(0.5f)));
+    }
+    else
+    {
+        vd_ff = (mcl_scalar)0;
+        vq_ff = (mcl_scalar)0;
+    }
 
     *vd = MCL_ADD(vd_pi, vd_ff);
     *vq = MCL_ADD(vq_pi, vq_ff);

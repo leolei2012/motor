@@ -78,6 +78,8 @@ static void smo_reset(void *impl)
     self->e_alpha_final = (mcl_scalar)0;
     self->e_beta_final = (mcl_scalar)0;
     self->w_est = (mcl_scalar)0;
+    self->z_alpha = (mcl_scalar)0;
+    self->z_beta = (mcl_scalar)0;
     self->theta_prev = (mcl_scalar)0;
 }
 
@@ -122,13 +124,16 @@ static void smo_update(void *impl, mcl_scalar v_alpha, mcl_scalar v_beta,
         return;
     }
 
-    /* 1. 电流误差（AN1078 约定：Ierr = EstI − I，估计值减实测值） */
+    /* 1. 电流误差（AN1078 约定：Ierr = EstI − I，估计值减实测值）。 */
+    self->dt = dt;
     err_a = MCL_SUB(self->i_alpha_hat, i_alpha);
     err_b = MCL_SUB(self->i_beta_hat, i_beta);
 
     /* 2. 滑模控制：z = Kslide·sat(err/MaxSMCError) */
     z_a = MCL_MUL(self->params.gain, smo_slide_component(err_a, self->params.boundary));
     z_b = MCL_MUL(self->params.gain, smo_slide_component(err_b, self->params.boundary));
+    self->z_alpha = z_a;
+    self->z_beta = z_b;
 
     /* 3. 电流观测（CalcEstI）：EstI = F·EstI + G·(V − E − Z)
           G = Ts/L、F = 1 − R·Ts/L */
@@ -228,15 +233,39 @@ static void smo_seed(void *impl, mcl_scalar flux_alpha, mcl_scalar flux_beta)
         return;
     }
 
-    /* 预置反电动势方向：e 与转子磁链垂直（e = ωe·J·λ）。
-       mcl 反电动势约定 e_α=−ωλ·sinθ、e_β=+ωλ·cosθ，磁链 λ=(flux_alpha, flux_beta)
-       对应 (λcosθ, λsinθ)，故 e = ωe·(−λ_β, λ_α)：
-         e_α = −λ_β、e_β = +λ_α（幅值 −ωλ，方向由滤波收敛到实际幅值）。 */
-    self->e_alpha = MCL_NEG(flux_beta);
-    self->e_beta = flux_alpha;
+    /* 预置反电动势方向，使 SMO 输出相位 = 给定磁链相位 φ：
+       SMO 输出 θ_out = atan2(−e_α, e_β) + 102.81°（固定相移 δ=1.7944rad，
+       补偿两级低通在 Kslf=ω·Ts 时的总相移 71.57° + 本工程实测残余 31.24°）。
+       要求 atan2(−e_α, e_β) = φ − δ，即 e 方向 ψ = φ − δ：
+         e = λ·(−sin(φ−δ), cos(φ−δ)) → e_α = f_α·sinδ − f_β·cosδ、e_β = f_α·cosδ + f_β·sinδ
+       δ=1.7944rad → cosδ=−0.22172、sinδ=+0.97512。
+       （旧实现 e=(−f_β, f_α) 未考虑输出 +102.81°：拖动期间 PLL 跟踪 φ+102.81°，
+       切闭环瞬间电流矢量落 φ−167° → 负转矩急停 → 反复重新开环，实测复现。） */
+    /* 关键：seed 入参是「转子磁链矢量」（幅值 = bemf_const = λ），SMO 的 e 状态是
+       「反电动势」（幅值 = ω·λ）。直接填 λ 幅值偏小 ω 倍，但方向是对的；观测器
+       会在驱动期把 e 幅值自行拉回真实反电动势（滑动项 z 驱动），此处不强行缩放
+       （缩放需 w_est/dt，而拖动期 SMO 的 θ 可能与真方向反号 → 缩放会引入 180° 跳，
+       实测复现）。保持方向、让幅值自然收敛。 */
+    self->e_alpha = MCL_ADD(MCL_MUL(MCL_FROM_FLOAT(0.97512f), flux_alpha),
+                            MCL_MUL(MCL_FROM_FLOAT(0.22172f), flux_beta));
+    self->e_beta = MCL_ADD(MCL_MUL(MCL_FROM_FLOAT(-0.22172f), flux_alpha),
+                           MCL_MUL(MCL_FROM_FLOAT(0.97512f), flux_beta));
     self->e_alpha_final = self->e_alpha;
     self->e_beta_final = self->e_beta;
+    /* 关键：seed 必须把角度基准 θ_prev 对齐到输出角（去掉 +102.81° 相移），
+       否则切闭环首拍 dtheta=输出角−旧 θ_prev 满跳 102.81° → w_est 差分出
+       垃圾、Kslf 乱（实测 SMO 切换后 t2 转速 52.36→1.64 崩）。
+       i_alpha_hat 在拖动期间已由 update 收敛到实测电流，这里不重置；
+       w_est 归 0（下一拍由 dtheta 重建）。 */
     self->w_est = (mcl_scalar)0;
+    /* theta_prev 必须 = 输出角（含 +102.81° 相移），与 update 里 dtheta 的
+       θ 同一口径：update 里 θ = atan2(−e_α,e_β)+δ 再差分。seed 的 e 已预旋
+       δ，故 atan2(−e_α,e_β) = φ−δ，+δ = φ（seed 目标）。设成 φ 使首拍
+       dtheta≈真实角增量，避免跳 δ=1.794rad（实测 w_est 爆到 0.806、obs 卡死）。 */
+    self->theta_prev = mcl_math_atan2(MCL_NEG(self->e_alpha_final), self->e_beta_final);
+    self->theta_prev = MCL_ADD(self->theta_prev, MCL_FROM_FLOAT(1.794373f));
+    if (self->theta_prev > MCL_PI) { self->theta_prev = MCL_SUB(self->theta_prev, MCL_TWO_PI); }
+    if (self->theta_prev < MCL_NEG(MCL_PI)) { self->theta_prev = MCL_ADD(self->theta_prev, MCL_TWO_PI); }
 }
 
 const mcl_observer_ops mcl_observer_smo_ops = {

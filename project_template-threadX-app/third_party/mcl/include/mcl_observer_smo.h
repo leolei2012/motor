@@ -73,6 +73,9 @@ typedef struct
     mcl_scalar e_beta_final;        /**< 反电动势 β（二级滤波，用于角度） */
     mcl_scalar w_est;               /**< 估计电气速度（带符号，用于自适应滤波系数） */
     mcl_scalar theta_prev;          /**< 上一拍角度（速度差分） */
+    mcl_scalar dt;                  /**< 控制周期 s（seed 里反电动势换算 ω=w_est/dt 用） */
+    mcl_scalar z_alpha;             /**< 诊断：本拍滑模输出 z_α（饱和/线性区） */
+    mcl_scalar z_beta;              /**< 诊断：本拍滑模输出 z_β */
 } mcl_observer_smo;
 
 /**

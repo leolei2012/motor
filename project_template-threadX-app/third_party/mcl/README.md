@@ -116,6 +116,7 @@ void pwm_isr(void)
 | `docs/spec/mcl_spec.md` | 规格书：定位、功能需求、API、性能指标 |
 | `docs/spec/mcl_architecture.md` | 代码架构设计：分层、模块 DAG、对象模型 |
 | `docs/spec/mcl_fixed_point.md` | 定点使用说明：归一化、转换宏、切换步骤 |
+| `docs/spec/mcl_adr_precharge.md` | 架构决策记录 ADR：自举电容预充电下沉到 mcl（方案 A，待实现） |
 | `docs/规范/` | 工程规范：架构、编码、子模块 |
 
 ## 当前状态

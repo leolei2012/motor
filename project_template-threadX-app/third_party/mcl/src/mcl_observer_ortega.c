@@ -78,14 +78,16 @@ static void ortega_update(void *impl, mcl_scalar v_alpha, mcl_scalar v_beta,
     lambda_alpha = MCL_SUB(self->x1, L_ia);
     lambda_beta = MCL_SUB(self->x2, L_ib);
 
-    /* 幅值平方误差：err = λ² - |λ_r|²，非对称 clamp（err>0 置 0）保证收敛 */
+    /* 幅值平方误差：err = |λ_nom|² − |λ_est|²（双向反馈）。
+       历史教训：曾用 VESC 原版的「非对称 clamp」（err>0 置 0，只在幅值偏大时
+       负反馈），导致幅值一旦偏小（|λ|<λ_nom）就失去反馈、纯积分继续漂、
+       磁链塌缩到 ~0.0009、角度失锁（实测复现）。改双向：幅值偏小 err>0 沿
+       λ 方向正反馈拉大、偏大 err<0 负反馈压小，稳定点在 |λ|=λ_nom，角度由
+       此自动收敛到真实转子磁链，对初始角度/R/L 误差鲁棒（对齐 VESC 的
+       λ²−|λ|² 平衡意图）。 */
     err = MCL_SUB(MCL_MUL(lambda, lambda),
                   MCL_ADD(MCL_MUL(lambda_alpha, lambda_alpha),
                           MCL_MUL(lambda_beta, lambda_beta)));
-    if (err > (mcl_scalar)0)
-    {
-        err = (mcl_scalar)0;
-    }
 
     /* 定子磁链积分 + 沿 λ_r 方向的幅值反馈 */
     self->x1 = MCL_ADD(self->x1,

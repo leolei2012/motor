@@ -1,0 +1,4 @@
+event: message
+data: {"result":{"content":[{"type":"text","text":"{\"id\":\"fb57d228-1271-4896-a2cf-3cb3313d9fd8\",\"deviceId\":3,\"mode\":\"continuous\",\"intervalMs\":5,\"addresses\":[{\"area\":\"holding-register\",\"address\":8246},{\"area\":\"holding-register\",\"address\":8248},{\"area\":\"holding-register\",\"address\":8250}],\"originalPollInterval\":80,\"status\":\"done\",\"startedAt\":1789324538189,\"finishedAt\":1789324538800,\"samples\":[{\"ts\":\"2026-09-13T18:35:38.649Z\",\"area\":\"holding-register\",\"address\":8246,\"rawValue\":15576,\"quality\":\"good\"},{\"ts\":\"2026-09-13T18:35:38.649Z\",\"area\":\"holding-register\",\"address\":8248,\"rawValue\":15905,\"quality\":\"good\"},{\"ts\":\"2026-09-13T18:35:38.649Z\",\"area\":\"holding-register\",\"address\":8250,\"rawValue\":14902,\"quality\":\"good\"}],\"trigger\":null,\"triggered\":false,\"lastTriggerValue\":null}"}]},"jsonrpc":"2.0","id":83}
+
+

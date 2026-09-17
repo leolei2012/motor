@@ -174,6 +174,15 @@ static void mcl_openloop_auto(mcl *self, mcl_scalar *phase, mcl_scalar *speed)
         if (self->ol_timer < (mcl_scalar)0)
         {
             self->ol_timer = (mcl_scalar)0;
+            /* 序列结束瞬间 seed PLL：拖动期间 PLL 输入是 seed 前的观测器输出，
+               每拍都带一拍积分增量，PLL 相位会被带到远离真实磁链（实测落后约
+               190°、速度仅 6~23 rad/s），切闭环必崩。这里直接把 PLL 对准下一拍
+               的 PLL 输入：观测器输出 = 转子磁链角 = ol_phase（seed_angle=0），
+               预推一拍 = ol_phase+ω·dt，速度设为拖动速度。 */
+            self->pll.phase = mcl_wrap_full_turn(MCL_ADD(self->ol_phase,
+                mcl_speed_to_phase_incr(self->ol_speed, dt)));
+            self->pll.speed = self->ol_speed;
+            self->pll.last_phase = self->pll.phase;
         }
         self->ol_hyst_timer = (mcl_scalar)0;
     }
@@ -287,6 +296,11 @@ static void mcl_control_tick_foc(mcl *self)
                             MCL_MUL(self->v_alpha_prev, MCL_MUL(vbus, MCL_FROM_FLOAT(0.5f))),
                             MCL_MUL(self->v_beta_prev, MCL_MUL(vbus, MCL_FROM_FLOAT(0.5f))),
                             i_alpha, i_beta, self->dt, &phase, NULL);
+
+        /* 观测器输出即「转子磁链角」（FOC d 轴 = 磁链、q 轴 = 转矩轴），直接作
+           帧角。当前观测器 = Ortega 磁链观测器（VESC 式）：θ=atan2(λ_β,λ_α)、
+           幅值反馈 λ²−|λ|² 让 λ 自动收敛到真实磁链，无固定相移、对参数误差
+           鲁棒（避免了 SMO 预设相移 δ 导致的口径型 90°/180° 翻面）。 */
         mcl_pll_run(&self->pll, phase, self->dt, &phase, &speed);
 
         /* 自动开环→闭环切换：闭环控制模式下，低速段开环拖动 */

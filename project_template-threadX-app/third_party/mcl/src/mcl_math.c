@@ -41,6 +41,12 @@ static void mcl_math_table_init(void)
 /** 角度归一到 [0, 2π) */
 static float mcl_math_norm(float x)
 {
+    /* 病态输入兜底：±inf/NaN/超大值会让 while 死循环或空转上亿次
+       （曾实测经 PLL 传导后整机冻结），非有限/超界归 0。 */
+    if (!(x >= -1.0e6f && x <= 1.0e6f))
+    {
+        return 0.0f;
+    }
     while (x >= MCL_TWO_PI)
     {
         x -= MCL_TWO_PI;

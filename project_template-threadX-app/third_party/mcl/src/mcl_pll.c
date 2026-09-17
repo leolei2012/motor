@@ -26,6 +26,15 @@
 /** 角度归一到 [-半圈, 半圈) */
 static mcl_scalar mcl_pll_wrap(mcl_scalar x)
 {
+    /* 病态输入兜底（float）：±inf/NaN/超大有限值会让 while 循环
+       死循环或空转上亿次（实测：vbus=0 启动初期解耦前馈除零产生 ±inf，
+       经观测器传导到 PLL 后整机冻结）。非有限/超界一律归 0 优雅复位。 */
+#if !defined(MCL_USE_Q15) && !defined(MCL_USE_Q31)
+    if (!(x >= MCL_NEG(MCL_FROM_FLOAT(1.0e6f)) && x <= MCL_FROM_FLOAT(1.0e6f)))
+    {
+        return (mcl_scalar)0;
+    }
+#endif
     while (x > MCL_PLL_HALF_TURN)
     {
         x -= MCL_PLL_FULL_TURN;
@@ -126,6 +135,14 @@ void mcl_pll_run(mcl_pll *self, mcl_scalar phase, mcl_scalar dt,
             }
         }
         self->last_phase = phase;
+
+        /* speed 非有限兜底（NaN 比较恒假、限幅器救不回来，会永久毒化
+           phase 积分）：直接复位 0，PLL 从零重锁。 */
+        if (!(self->speed >= MCL_NEG(MCL_FROM_FLOAT(1.0e6f)) &&
+              self->speed <= MCL_FROM_FLOAT(1.0e6f)))
+        {
+            self->speed = (mcl_scalar)0;
+        }
     }
 #endif
 
