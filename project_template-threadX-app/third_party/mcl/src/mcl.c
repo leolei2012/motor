@@ -142,12 +142,14 @@ static void mcl_openloop_auto(mcl *self, mcl_scalar *phase, mcl_scalar *speed)
     /* 6. 开环运行 */
     if (self->ol_timer > (mcl_scalar)0)
     {
-        /* 三段式时间序列：锁定(转速0，id 对齐) → 斜坡(0→max) → 匀速(max) */
+        /* 三段式时间序列：锁定(转速0，id 对齐) → 斜坡(0→max) → 匀速(max)。
+           重开环（已启动过一次）时跳过锁定段：直接匀速 IF 拖行，避免掉速重入时
+           「转速=0 停转锁定」造成用户看到的「突然停」（对齐 VESC 低速段不重对齐）。 */
         time_fwd = MCL_SUB(total, self->ol_timer);
-        if (time_fwd < t_lock)
+        if (time_fwd < t_lock && self->ol_started_once == 0u)
         {
             ol_rpm = (mcl_scalar)0;
-            self->ol_stage = 1;   /* 锁定：固定相位，id 对齐 */
+            self->ol_stage = 1;   /* 首次启动锁定：固定相位，id 对齐 */
         }
         else
         {
@@ -157,6 +159,10 @@ static void mcl_openloop_auto(mcl *self, mcl_scalar *phase, mcl_scalar *speed)
             {
                 ol_rpm = MCL_MUL(ol_rpm_max,
                                  MCL_DIV(MCL_SUB(time_fwd, t_lock), t_ramp));
+            }
+            if (ol_rpm < MCL_MUL(ol_rpm_max, MCL_FROM_FLOAT(0.1f)))
+            {
+                ol_rpm = MCL_MUL(ol_rpm_max, MCL_FROM_FLOAT(0.1f)); /* 斜坡起点不低于 10%，避免从 0 拖起 */
             }
         }
 
@@ -181,6 +187,7 @@ static void mcl_openloop_auto(mcl *self, mcl_scalar *phase, mcl_scalar *speed)
         if (self->ol_timer < (mcl_scalar)0)
         {
             self->ol_timer = (mcl_scalar)0;
+            self->ol_started_once = 1u;   /* 首次开环序列已完成，之后重开环跳过锁定段 */
             /* 序列结束瞬间 seed PLL：拖动期间 PLL 输入是 seed 前的观测器输出，
                每拍都带一拍积分增量，PLL 相位会被带到远离真实磁链（实测落后约
                190°、速度仅 6~23 rad/s），切闭环必崩。这里直接把 PLL 对准下一拍
@@ -664,6 +671,7 @@ int mcl_init(mcl *self, const mcl_config *cfg,
     self->ol_speed = (mcl_scalar)0;
     self->ol_phase = (mcl_scalar)0;
     self->ol_stage = 0u;
+    self->ol_started_once = 0u;
     self->tick_count = 0u;
     self->fault_timer = (mcl_scalar)0;
     self->fault_info.fault = MCL_FAULT_NONE;

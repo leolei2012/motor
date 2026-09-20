@@ -233,10 +233,8 @@ int drv_motor_init(struct drv_motor *self)
           再饱和，形成 1-2Hz 大摆幅极限环。折算到 rpm 并再调柔：
           Kp=0.02 A/rpm（50rpm 误差→1.0A，穿越 ~6Hz）、Ki=0.1（零点 ~0.8Hz）。 */
     cfg.speed_pid.kp = 0.005f;
-    cfg.speed_pid.ki = 0.002f;   /* 纯比例(ki=0)已确证「不停」（32s 全程闭环 0 次重开环），
-                                    但中心偏高 ~430rpm（静差 + 估速偏高）。加极小 ki=0.002
-                                    逐步消静差、把中心拉回 300；远小于曾致停的 0.005/0.02，避免
-                                    积分饱和反向再引发停转。 */
+    cfg.speed_pid.ki = 0.002f;   /* seed45°+跳锁定段后：kp=0.005 最佳（avg324、摆动249~438、
+                                    拖2次、锁0次）；kp=0.003 太软摆动更大(231~477)、拖6次。 */
     cfg.speed_pid.kd = 0.0f;
     cfg.speed_pid.out_min = -1.5f;
     cfg.speed_pid.out_max = 1.5f;
@@ -264,11 +262,13 @@ int drv_motor_init(struct drv_motor *self)
                                                 到拖动位要摆 ~90°，摆动未稳就切闭环 → 帧超前真实
                                                 磁链 → 负转矩急停。加长让摆动衰减） */
     cfg.openloop_time       = 0.3f;           /* 拖动匀速保持 0.3s（原默认 0.05s，同上加长等转子稳定） */
-    cfg.openloop_seed_angle = 0.0f;             /* seed 目标 = 转子磁链（观测器输出即转子，无修正角）。
-                                                 历史教训：曾按「空载转子超前磁场 90°」seed 到反电动势方向，
-                                                 与观测器自然输出（λ=ψ_s−L·i=λ_r）差 90°，内部状态偏离平衡点，
-                                                 叠加 R 参数误差（0.46 vs 0.69）导致输出以 ~75rad/s 旋转 →
-                                                 切闭环 ~100ms 必崩。 */
+    cfg.openloop_seed_angle = 0.78539816f;    /* seed 负载角补偿 = π/4 = 45°（对齐 VESC foc 低速段
+                                                 seed：phase + SIGN(duty)*M_PI/4）。历史教训：曾用 0°
+                                                 （无补偿，观测器从磁场角起步 → 磁链方向超前真实转子 →
+                                                 PLL 估速偏高 ~30% → 速度环慢摆/低速失锁）；也曾按
+                                                 「转子超前 90°」误 seed 反电动势方向导致 100ms 必崩。
+                                                 VESC 实测用 45° 折中：既补偿 I/F 拖动滑差，又不致 90°
+                                                 完全错位。 */
 
     /* —— 保护阈值（UserData_Motor.h safe 段）—— */
     /*

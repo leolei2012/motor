@@ -97,6 +97,7 @@ typedef struct
     mcl_scalar ol_speed;        /**< 自动开环当前电气角速度 rad/s */
     mcl_scalar ol_phase;        /**< 自动开环积分相位 rad */
     uint8_t   ol_stage;         /**< 自动开环阶段：0=未开环 1=锁定(对齐) 2=拖动 */
+    uint8_t   ol_started_once;  /**< 是否已启动过一次（1=重开环跳过锁定段，直接匀速 IF 拖行不停转） */
     uint32_t tick_count;        /**< 控制周期计数（分频用） */
     mcl_fault_info fault_info;  /**< 故障现场快照 */
     mcl_scalar fault_timer;     /**< 故障恢复计时 s */
