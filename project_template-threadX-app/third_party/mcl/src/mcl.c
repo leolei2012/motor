@@ -207,8 +207,8 @@ static void mcl_openloop_auto(mcl *self, mcl_scalar *phase, mcl_scalar *speed)
                但空载稳态电流远小于拖动 2A，全量预置会造成超调（实测冲到 250rad/s）。
                改用拖动电流一半（≈1A，低于 out_max 1.5A），减小切闭环超调。 */
             self->pid_speed.i_term = (dir >= (mcl_scalar)0)
-                ? MCL_MUL(self->cfg.openloop_drag_q, MCL_FROM_FLOAT(0.5f))
-                : MCL_NEG(MCL_MUL(self->cfg.openloop_drag_q, MCL_FROM_FLOAT(0.5f)));
+                ? MCL_MUL(self->cfg.openloop_drag_q, MCL_FROM_FLOAT(0.15f))  /* 0.3A，接近空载稳态电流，避免预置过大顶高转速 */
+                : MCL_NEG(MCL_MUL(self->cfg.openloop_drag_q, MCL_FROM_FLOAT(0.15f)));
             self->pid_speed.prev_out = self->pid_speed.i_term;
 
             /* 切闭环后观测器锚定：继续 seed 观测器到当前帧角（=转子磁链角）一小段
@@ -427,18 +427,11 @@ static void mcl_control_tick_foc(mcl *self)
                                  MCL_SUB(self->speed_ref_rpm, speed),
                                  MCL_MUL(self->dt, (mcl_scalar)self->cfg.speed_loop_divider));
 #else
-            /* 反馈量单独低通滤波：速度环反馈 = PLL 瞬时估速，噪声大。只滤反馈量，
-               不动前向通路/前馈（此前把滤波加在 speed 上会污染解耦前馈，反而更差）。
-               滤波只在这个 1kHz 分频执行点更新，fc=20Hz（远高于机械 ~0.3Hz 慢摆，
-               不引入明显滞后，但压掉 PLL 估速的高频抖动）。 */
-            {
-                mcl_scalar falpha = MCL_MUL(MCL_FROM_FLOAT(2.0f * 3.14159265f * 20.0f),
-                                            MCL_MUL(self->dt, (mcl_scalar)self->cfg.speed_loop_divider));
-                /* falpha = 2π·20·dt_loop(=1ms) ≈ 0.1257 */
-                self->fb_speed_filt = MCL_ADD(self->fb_speed_filt,
-                    MCL_MUL(MCL_SUB(speed, self->fb_speed_filt), falpha));
-            }
-            mcl_scalar fb_rpm = MCL_MUL(self->fb_speed_filt, MCL_FROM_FLOAT(MCL_RPM_PER_RAD_S /
+            /* 速度环反馈直接取 PLL 瞬时估速，不再低通滤波。
+               历史教训：曾加 20Hz 反馈滤波，但滤波滞后让速度环永远"追不上"
+               PLL 已爬升的原始速度 → 正反馈持续爬升（实测 spd 一路 157→259rad/s
+               不回头、avg 320~385 偏高）。去掉滤波后反馈即时，速度环才能锁住 300。 */
+            mcl_scalar fb_rpm = MCL_MUL(speed, MCL_FROM_FLOAT(MCL_RPM_PER_RAD_S /
                                         (float)self->cfg.pole_pairs));
             iq_ref = mcl_pid_run(&self->pid_speed,
                                  MCL_SUB(self->speed_ref_rpm, fb_rpm),

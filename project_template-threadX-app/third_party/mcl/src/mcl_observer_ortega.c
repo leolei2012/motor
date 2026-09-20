@@ -70,7 +70,29 @@ static void ortega_update(void *impl, mcl_scalar v_alpha, mcl_scalar v_beta,
         return;
     }
 
-    gamma_half = MCL_MUL(self->params.gain, MCL_FROM_FLOAT(0.5f));
+    /* 动态 gain 缩放（对齐 VESC mcpwm_foc.c 4150-4158 行）：
+       VESC 用 |duty|∈[0, 40/v_bus] 映射 gamma∈[0, gain]，再 clamp 到 gain_slow×gain，
+       最后 ×4。目的：低速（电压幅值小）时反电动势信号弱，全量 gain 会让幅值反馈
+       在磁链上过驱动震荡；高速时需要全量 gain 压住积分慢漂。
+       这里用电压幅值 |v|=√(vα²+vβ²) 替代 duty（两者成正比：相电压≈duty·vbus/2），
+       无需额外传 duty。v_max 取 vbus/2（此时 scale→1 全量）。 */
+    {
+        mcl_scalar v_mag = mcl_math_sqrt(MCL_ADD(MCL_MUL(v_alpha, v_alpha),
+                                                  MCL_MUL(v_beta, v_beta)));
+        mcl_scalar v_norm = MCL_DIV(v_mag, MCL_FROM_FLOAT(12.0f)); /* vbus/2=12V */
+        mcl_scalar gain_slow = MCL_FROM_FLOAT(0.05f);              /* 低速下限比例 */
+        mcl_scalar gamma_scale;
+        if (v_norm > MCL_FROM_FLOAT(1.0f))
+        {
+            v_norm = MCL_FROM_FLOAT(1.0f);
+        }
+        if (v_norm < gain_slow)
+        {
+            v_norm = gain_slow;
+        }
+        gamma_scale = v_norm;   /* gain 按电压幅值线性缩放，下限 0.05 */
+        gamma_half = MCL_MUL(MCL_MUL(self->params.gain, gamma_scale), MCL_FROM_FLOAT(0.5f));
+    }
     L_ia = MCL_MUL(L, i_alpha);
     L_ib = MCL_MUL(L, i_beta);
 
@@ -78,16 +100,18 @@ static void ortega_update(void *impl, mcl_scalar v_alpha, mcl_scalar v_beta,
     lambda_alpha = MCL_SUB(self->x1, L_ia);
     lambda_beta = MCL_SUB(self->x2, L_ib);
 
-    /* 幅值平方误差：err = |λ_nom|² − |λ_est|²（双向反馈）。
-       历史教训：曾用 VESC 原版的「非对称 clamp」（err>0 置 0，只在幅值偏大时
-       负反馈），导致幅值一旦偏小（|λ|<λ_nom）就失去反馈、纯积分继续漂、
-       磁链塌缩到 ~0.0009、角度失锁（实测复现）。改双向：幅值偏小 err>0 沿
-       λ 方向正反馈拉大、偏大 err<0 负反馈压小，稳定点在 |λ|=λ_nom，角度由
-       此自动收敛到真实转子磁链，对初始角度/R/L 误差鲁棒（对齐 VESC 的
-       λ²−|λ|² 平衡意图）。 */
+    /* 幅值平方误差：err = |λ_nom|² − |λ_est|²，VESC 原版「非对称 clamp」：
+       err>0（磁链偏小）时置 0 —— 这是 Ortega 论文（Bernard-Praly 2017）的收敛性
+       要求：只在上限负反馈压小，不往下限正反馈拉大。此前误改成「双向反馈」，
+       导致磁链偏小时正反馈与积分项耦合 → 磁链/角度慢漂 → 速度环慢摆 24s 一次
+       掉速重拖。恢复 VESC 原版非对称 clamp 以消除慢漂。 */
     err = MCL_SUB(MCL_MUL(lambda, lambda),
                   MCL_ADD(MCL_MUL(lambda_alpha, lambda_alpha),
                           MCL_MUL(lambda_beta, lambda_beta)));
+    if (err > (mcl_scalar)0)
+    {
+        err = (mcl_scalar)0;
+    }
 
     /* 定子磁链积分 + 沿 λ_r 方向的幅值反馈 */
     self->x1 = MCL_ADD(self->x1,

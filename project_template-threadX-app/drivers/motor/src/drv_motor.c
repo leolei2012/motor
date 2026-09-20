@@ -233,9 +233,12 @@ int drv_motor_init(struct drv_motor *self)
           再饱和，形成 1-2Hz 大摆幅极限环。折算到 rpm 并再调柔：
           Kp=0.02 A/rpm（50rpm 误差→1.0A，穿越 ~6Hz）、Ki=0.1（零点 ~0.8Hz）。 */
     cfg.speed_pid.kp = 0.005f;
-    cfg.speed_pid.ki = 0.002f;   /* seed45°+跳锁定段后：kp=0.005 最佳（avg324、摆动249~438、
-                                    拖2次、锁0次）；kp=0.003 太软摆动更大(231~477)、拖6次。 */
-    cfg.speed_pid.kd = 0.0f;
+    cfg.speed_pid.ki = 0.002f;   /* 恢复小 ki：纯 PD(ki=0) 时 i_term 预置 1A 残留成永久偏置，
+                                    把转速顶到 480rpm 而非 300。ki=0.002 让 i_term 收敛到正确
+                                    稳态值(iq≈0.3A)，消静差又不致积分慢摆。 */
+    cfg.speed_pid.kd = 0.5f;     /* 微分阻尼：消除 195~352rpm 的剩余摆动。d_term=kd×(err−prev_err)，
+                                    未除 dt(1ms)，摆动 ±80rpm/周期~4s → 每ms误差变~0.08rpm，
+                                    kd=0.5 → ~0.04A 阻尼（温和）。 */
     cfg.speed_pid.out_min = -1.5f;
     cfg.speed_pid.out_max = 1.5f;
     cfg.speed_pid.i_min   = -1.5f;
@@ -293,9 +296,9 @@ int drv_motor_init(struct drv_motor *self)
     op.lambda     = cfg.bemf_const;         /* 7.17mWb 永磁磁链 */
     op.resistance = cfg.phase_resistance;   /* 0.475Ω（相值=线 0.95/2） */
     op.inductance = cfg.phase_inductance;   /* 0.80mH（相电感 Lq） */
-    op.gain       = 100.0f;                 /* 观测器增益 γ（1/s）。双向反馈后 1000 过猛：
-                                              err(λ²量级 1e-5)·λ_r·γ/2·dt 每拍把 x 推到 0.099
-                                              （稳态应≈0.007）→ 发散（实测 x 符号翻转），降到 100。 */
+    op.gain       = 750000.0f;               /* 观测器增益 γ = 600/L = 600/0.0008（VESC 注释推荐量级，
+                                               对应 m_gamma 未 ×4）。恢复非对称 clamp 后必须回到此量级
+                                               压住积分慢漂；100~180000 太弱致慢漂掉速，750000 实测最佳。 */
 
     if (mcl_init(&self->motor, &cfg, &s_mcl_hal, self,
                  &mcl_observer_ortega_ops, &self->observer, &op) != MCL_OK)
