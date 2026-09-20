@@ -79,6 +79,7 @@ typedef struct
     mcl_scalar pos_ref_rad;     /**< 位置目标 rad */
     mcl_scalar phase_rad;       /**< 当前电气角 rad */
     mcl_scalar speed_rad_s;     /**< 当前速度 rad/s */
+    mcl_scalar fb_speed_filt;   /**< 速度环反馈低通滤波值 rad/s（只滤反馈，不碰前馈/前向） */
     mcl_scalar vbus;            /**< 母线电压缓存 V */
     mcl_scalar id_now;          /**< 当前 Id A */
     mcl_scalar iq_now;          /**< 当前 Iq A */
@@ -92,6 +93,7 @@ typedef struct
     mcl_scalar openloop_mag;    /**< 开环幅值（VF：电压标幺 [-1,1]；IF/ALIGN：电流 A） */
     mcl_scalar ol_timer;        /**< 自动开环序列倒计时 s（>0 表示正在开环） */
     mcl_scalar ol_hyst_timer;   /**< 自动开环低速迟滞计时 s */
+    mcl_scalar ol_anchor_timer; /**< 切闭环后观测器锚定倒计时 s（>0：继续 seed 观测器到当前帧角，等电流重定向瞬态衰减） */
     mcl_scalar ol_speed;        /**< 自动开环当前电气角速度 rad/s */
     mcl_scalar ol_phase;        /**< 自动开环积分相位 rad */
     uint8_t   ol_stage;         /**< 自动开环阶段：0=未开环 1=锁定(对齐) 2=拖动 */

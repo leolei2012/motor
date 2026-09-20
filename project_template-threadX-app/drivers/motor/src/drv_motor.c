@@ -189,12 +189,19 @@ int drv_motor_init(struct drv_motor *self)
     mcl_config cfg;
     mcl_config_default(&cfg);
 
-    /* —— 电机实体参数（UserData_Motor.h，物理量 1:1 映射）—— */
-    cfg.pole_pairs          = 10u;                /* Poles=10 对极 */
-    cfg.phase_resistance    = 0.69f;              /* Rs=0.69Ω（直流实测真值；脉冲法 0.95/1.56 受死区污染） */
-    cfg.phase_inductance    = 3.0e-3f;            /* L=3.0mH（IF 稳态 v-i 矢量反解；脉冲法 0.92mH 偏低） */
-    cfg.ld_lq_diff          = 0.15e-3f;           /* Lq-Ld = 1.6mH-1.45mH = 0.15mH (IPMSM) */
-    cfg.bemf_const          = 3.586e-3f;          /* 磁链 λ=3.586mVs/rad */
+    /* —— 电机实体参数（铭牌：极对数 5、相间电阻 0.95Ω、V_RMS 4.6V@1000rpm、
+       Ld 1.45/Lq 1.6mH @1kHz，均为「相间」值）——
+       星接(Y) 换算成相值：
+         - 相电阻 R_ph = R_LL/2 = 0.475Ω
+         - 相磁链 λ：V_ph_RMS = 4.6/√3 = 2.656V @1000rpm(机械)，
+           ω_el = 1000×2π/60×5(pole_pairs) = 523.6 rad/s，
+           λ = V_ph_RMS·√2/ω_el = 2.656×1.4142/523.6 ≈ 7.17mWb
+         - 相电感：d 轴 ≈ Ld/2 = 0.725mH、q 轴 ≈ Lq/2 = 0.80mH（凸极差 0.075mH） */
+    cfg.pole_pairs          = 5u;                /* 极对数 = 5（Poles=5，非 10） */
+    cfg.phase_resistance    = 0.475f;            /* 相电阻 = 线 0.95/2 */
+    cfg.phase_inductance    = 0.8e-3f;           /* 相电感 Lq（线 Lq 1.6mH/2） */
+    cfg.ld_lq_diff          = 0.075e-3f;         /* Lq-Ld = 0.80-0.725 = 0.075mH (IPMSM) */
+    cfg.bemf_const          = 7.17e-3f;          /* 相磁链 λ≈7.17mWb（由 4.6V@1000rpm、5 对极反解） */
     cfg.rated_current       = 4.0f;               /* Qcur_MAX=4A */
     cfg.rated_speed_rpm     = 3000.0f;            /* 参考值，默认保留 */
     cfg.bus_voltage         = 24.0f;              /* VBUS=24V */
@@ -225,8 +232,11 @@ int drv_motor_init(struct drv_motor *self)
           把 iq_ref 打到 ±1.5A 饱和 → 加速→超调(实测冲到 191rpm)→急刹→低速→
           再饱和，形成 1-2Hz 大摆幅极限环。折算到 rpm 并再调柔：
           Kp=0.02 A/rpm（50rpm 误差→1.0A，穿越 ~6Hz）、Ki=0.1（零点 ~0.8Hz）。 */
-    cfg.speed_pid.kp = 0.01f;
-    cfg.speed_pid.ki = 0.05f;
+    cfg.speed_pid.kp = 0.005f;
+    cfg.speed_pid.ki = 0.002f;   /* 纯比例(ki=0)已确证「不停」（32s 全程闭环 0 次重开环），
+                                    但中心偏高 ~430rpm（静差 + 估速偏高）。加极小 ki=0.002
+                                    逐步消静差、把中心拉回 300；远小于曾致停的 0.005/0.02，避免
+                                    积分饱和反向再引发停转。 */
     cfg.speed_pid.kd = 0.0f;
     cfg.speed_pid.out_min = -1.5f;
     cfg.speed_pid.out_max = 1.5f;
@@ -237,11 +247,17 @@ int drv_motor_init(struct drv_motor *self)
           → ±40rad/s 帧速率摆动，电流矢量被甩来甩去。VESC 式低 kp 高阻尼折中：
           kp=40、ki=1000 → ωn≈31.6rad/s≈5Hz、ζ≈0.63，速度噪声 ≈1/8 of ki=8000。 */
     cfg.pll_kp = 40.0f;
-    cfg.pll_ki = 1000.0f;
+    cfg.pll_ki = 200.0f;  /* 切闭环后 PLL 速度估计超调（实测冲到 400rpm=209rad/s，真实转子仅 300rpm），
+                            速度环据此反向加大 iq 刹停→掉速→重开环极限环。降到 200 让速度估计
+                            更平滑，减小与真实转速的偏差（对齐 VESC 低速低带宽）。 */
 
     /* —— 无感自动开环启动参数（VESC 式：锁定 → 斜坡 → 拖动 → 切 SMO 闭环）—— */
-    cfg.openloop_rpm        = 50.0f;         /* 开环拖动转速上限 50rpm（切闭环瞬态更平缓；
-                                                电流环带宽 ~48Hz，50rpm 电频率 8.3Hz 余量足） */
+    cfg.openloop_rpm        = 300.0f;        /* 开环拖动转速上限 300rpm（切闭环反电动势充足）。
+                                                历史教训：50rpm 时反电动势 ωλ=2.6×7.17mWb≈0.19V，
+                                                相对电阻压降 R·i≈0.95V（2A）信噪仅 1:5，Ortega 纯积分
+                                                观测器角度被 R·i 主导 → 轻微 R 误差就让磁链相位漂移
+                                                ~50rad/s、~64ms 内 180° 翻转失锁。300rpm 反电动势
+                                                ≈1.13V 与 R·i 相当，观测器有足够信号锁定。 */
     cfg.openloop_drag_q     = 2.0f;           /* 开环拖动 q 轴电流 2A（锁定与拖动共用，加强对齐） */
     cfg.openloop_time_lock  = 0.2f;           /* 锁定对齐时间 0.2s（加长，确保转子可靠对齐到稳定平衡点） */
     cfg.openloop_time_ramp  = 0.3f;           /* 拖动斜坡 0.3s（原默认 0.1s 太短：转子从锁定位
@@ -274,9 +290,9 @@ int drv_motor_init(struct drv_motor *self)
        没有 SMO 那种「预设相移 δ、口径一变就翻 90°/180°」的坑。
        R/L 初值用配置值，启动后由 drv_motor_measure_rl() 实测回填。 */
     mcl_observer_ortega_params op;
-    op.lambda     = cfg.bemf_const;         /* 3.586mWb 永磁磁链 */
-    op.resistance = cfg.phase_resistance;   /* 0.69Ω（启动实测回填） */
-    op.inductance = cfg.phase_inductance;   /* 3.0mH（启动实测回填） */
+    op.lambda     = cfg.bemf_const;         /* 7.17mWb 永磁磁链 */
+    op.resistance = cfg.phase_resistance;   /* 0.475Ω（相值=线 0.95/2） */
+    op.inductance = cfg.phase_inductance;   /* 0.80mH（相电感 Lq） */
     op.gain       = 100.0f;                 /* 观测器增益 γ（1/s）。双向反馈后 1000 过猛：
                                               err(λ²量级 1e-5)·λ_r·γ/2·dt 每拍把 x 推到 0.099
                                               （稳态应≈0.007）→ 发散（实测 x 符号翻转），降到 100。 */
@@ -759,24 +775,19 @@ int drv_motor_measure_rl(struct drv_motor *self)
     self->r_meas = r_meas;
     self->l_meas = l_meas;
 
-    /* L 实测值不可信（0.92mH）：IF 100rpm 稳态 v-i 矢量实测 v 超前 i ~45°，
-       反解 L≈3mH（旧工程 1.6mH 亦不符）。L 错误使观测器反馈 err 永不归零、
-       反馈项主导积分 → 磁链被钉死在错误静态角（实测 θ−λ_r 恒 +170°，
-       磁链不随转子旋转）。暂时用物理反解值 3mH 回填，脉冲法后续修正。 */
-    l_meas = 3.0e-3f;
-
-    /* R 用直流实测真值 0.69Ω（0.46Ω 是历史反解错误：当时把 +36° 稳态角差
-       全部归因于 ΔR，实为把「seed 90° 错位 + R 误差」混在一起反解的结果。
-       观测器稳态角差 ≈ ΔR·iq/ω/|λ|：ΔR=0.23、iq=2A、ω=52.4 → ≈50°，
-       正是当初实测 +36~49° 的来源——R 用真值后角差归零，无需任何修正角。 */
-    r_meas = 0.69f;
+    /* 回填观测器/电流环参数：R、L 用铭牌相值。R = 线 0.95/2 = 0.475Ω（冷态），
+       L = 线 Lq 1.6mH/2 = 0.80mH。曾试 R=0.55（运转温度估算）与 R=0.709（脉冲法
+       含死区偏高），前者使观测器相位略有超调、后者使 v−R·i 变负磁链反向，均不如
+       冷态 0.475 稳，故回填 0.475。 */
+    l_meas = 0.8e-3f;
+    r_meas = 0.475f;
 
     self->observer.params.resistance = (mcl_scalar)r_meas;
     self->observer.params.inductance = (mcl_scalar)l_meas;
     self->motor.cfg.phase_resistance = (mcl_scalar)r_meas;
     self->motor.cfg.phase_inductance = (mcl_scalar)l_meas;
     self->motor.foc.mtpa_fw.lq = (mcl_scalar)l_meas;
-    self->motor.foc.mtpa_fw.ld = (mcl_scalar)(l_meas - 0.15e-3f);  /* 保持 Lq−Ld=0.15mH 凸极差 */
+    self->motor.foc.mtpa_fw.ld = (mcl_scalar)(l_meas - 0.075e-3f);  /* Lq−Ld=0.075mH 凸极差 */
 
     return 0;
 }

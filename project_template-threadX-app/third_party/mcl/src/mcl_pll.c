@@ -119,14 +119,14 @@ void mcl_pll_run(mcl_pll *self, mcl_scalar phase, mcl_scalar dt,
 #if !defined(MCL_USE_Q15) && !defined(MCL_USE_Q31)
     {
         mcl_scalar diff = mcl_pll_wrap(MCL_SUB(phase, self->last_phase));
-        mcl_scalar diff_lim = MCL_FROM_FLOAT(1.0f / 6.0f);   /* π/3 */
+        mcl_scalar diff_lim = MCL_FROM_FLOAT(1.0f / 6.0f);
         mcl_scalar ref_speed;
 
         if (diff > diff_lim) { diff = diff_lim; }
         if (diff < MCL_NEG(diff_lim)) { diff = MCL_NEG(diff_lim); }
         if (dt > (mcl_scalar)0)
         {
-            ref_speed = MCL_DIV(diff, dt);                    /* rad/s，与 speed 同量纲 */
+            ref_speed = MCL_DIV(diff, dt);
             if (MCL_ABS(ref_speed) > MCL_FROM_FLOAT(1e-3f))
             {
                 mcl_scalar lim = MCL_MUL(MCL_ABS(ref_speed), MCL_FROM_FLOAT(3.0f));
@@ -136,8 +136,7 @@ void mcl_pll_run(mcl_pll *self, mcl_scalar phase, mcl_scalar dt,
         }
         self->last_phase = phase;
 
-        /* speed 非有限兜底（NaN 比较恒假、限幅器救不回来，会永久毒化
-           phase 积分）：直接复位 0，PLL 从零重锁。 */
+        /* speed 非有限兜底（NaN 恒假，永久毒化 phase 积分）：复位 0 重锁 */
         if (!(self->speed >= MCL_NEG(MCL_FROM_FLOAT(1.0e6f)) &&
               self->speed <= MCL_FROM_FLOAT(1.0e6f)))
         {
