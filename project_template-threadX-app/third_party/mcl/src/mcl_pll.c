@@ -68,6 +68,7 @@ void mcl_pll_reset(mcl_pll *self)
     self->phase = (mcl_scalar)0;
     self->speed = (mcl_scalar)0;
     self->last_phase = (mcl_scalar)0;
+    self->speed_est_fast = (mcl_scalar)0;
 }
 
 void mcl_pll_run(mcl_pll *self, mcl_scalar phase, mcl_scalar dt,
@@ -111,28 +112,39 @@ void mcl_pll_run(mcl_pll *self, mcl_scalar phase, mcl_scalar dt,
     /* 速度积分：speed += ki·err·dt */
     self->speed = MCL_ADD(self->speed, MCL_MUL(MCL_MUL(self->ki, err), dt));
 
-    /* PLL wind-up 保护（对齐 VESC mcpwm_foc.c 的 pll_speed 限幅）。
-       仅 float 启用：用输入相位差分（限幅 ±π/3）估计瞬时速度 ref=diff/dt，
-       把 PLL 积分速度限幅到 3×ref，防止失锁时 speed 无限累积。
-       定点下 speed 由 MCL_ADD 自然饱和到 [0,1)，且「圈/dt_pu」与「电气速度 pu」
-       差 2π 常数（2π 定点不可表达），故跳过——饱和已足够防无限增长。 */
+    /* PLL wind-up 保护（对齐 VESC mcpwm_foc.c foc_pll_run）。
+       仅 float 启用。定点下 speed 由 MCL_ADD 自然饱和到 [0,1)，且「圈/dt_pu」与
+       「电气速度 pu」差 2π 常数（2π 定点不可表达），故跳过——饱和已足够防无限增长。
+
+       VESC 原版：diff（输入相位差分）先限幅 ±π/3（rad；VESC 用「圈」量纲写成
+       1/6，旧代码把 1/6 直接当 rad 用，比 π/3 小 6.28×），diff·fs 经系数 ~0.01/拍
+       低通成 m_speed_est_fast，再把 PLL 积分速度限到它的 3×。
+       旧实现用「单拍差分 ref=diff/dt 直接钳 3×|ref|」：seed 后首拍观测器角度还
+       没转起来（diff≈0）→ ref≈0 → 418rad/s 在一拍内被钳到个位数（cap2 tick256
+       实测 418→8）。低通估计（τ≈3ms）不会因单拍失速把速度打崩。 */
 #if !defined(MCL_USE_Q15) && !defined(MCL_USE_Q31)
     {
         mcl_scalar diff = mcl_pll_wrap(MCL_SUB(phase, self->last_phase));
-        mcl_scalar diff_lim = MCL_FROM_FLOAT(1.0f / 6.0f);
-        mcl_scalar ref_speed;
+        const mcl_scalar diff_lim = MCL_FROM_FLOAT(3.14159265f / 3.0f);  /* ±π/3 rad */
 
         if (diff > diff_lim) { diff = diff_lim; }
         if (diff < MCL_NEG(diff_lim)) { diff = MCL_NEG(diff_lim); }
+
         if (dt > (mcl_scalar)0)
         {
-            ref_speed = MCL_DIV(diff, dt);
-            if (MCL_ABS(ref_speed) > MCL_FROM_FLOAT(1e-3f))
-            {
-                mcl_scalar lim = MCL_MUL(MCL_ABS(ref_speed), MCL_FROM_FLOAT(3.0f));
-                if (self->speed > lim) { self->speed = lim; }
-                if (self->speed < MCL_NEG(lim)) { self->speed = MCL_NEG(lim); }
-            }
+            /* 差分转速低通：k = dt/3ms（VESC 每拍 0.01 @~30µs 电流环 ≈ τ 3ms，按 dt 折算） */
+            mcl_scalar diff_dt = MCL_DIV(diff, dt);
+            mcl_scalar k_fast = MCL_MUL(dt, MCL_FROM_FLOAT(333.3333f));
+            if (k_fast > MCL_FROM_FLOAT(1.0f)) { k_fast = MCL_FROM_FLOAT(1.0f); }
+            self->speed_est_fast = MCL_ADD(self->speed_est_fast,
+                MCL_MUL(k_fast, MCL_SUB(diff_dt, self->speed_est_fast)));
+        }
+
+        /* 速度限幅到 3× 低通估计（低通估计≈0 时 speed 收敛到 0，符合失速语义） */
+        {
+            mcl_scalar lim = MCL_MUL(MCL_ABS(self->speed_est_fast), MCL_FROM_FLOAT(3.0f));
+            if (self->speed > lim) { self->speed = lim; }
+            if (self->speed < MCL_NEG(lim)) { self->speed = MCL_NEG(lim); }
         }
         self->last_phase = phase;
 

@@ -163,17 +163,17 @@ static enum mb_err_t dm_motor_read_half(uint16_t addr, uint16_t *out)
         case 0x31: value = dm->ic_now;                     break;
         case 0x32: value = dm->cap_post_spd;                 break; /* 复用：切换后 PLL 速度 rad/s（原 fault_temp） */
         case 0x33: value = dm->cap_post_spd;                 break;
-        /* ---- Ortega 观测器内部状态（诊断：定子磁链/磁链幅值） ---- */
-        case 0x36: value = (float)dm->observer.x1;          break; /* 定子磁链 α */
-        case 0x37: value = (float)dm->observer.x1;          break;
-        case 0x38: value = (float)dm->observer.x2;          break; /* 定子磁链 β */
-        case 0x39: value = (float)dm->observer.x2;          break;
-        case 0x3A: value = (float)dm->observer.lambda_est;   break; /* 转子磁链幅值 */
-        case 0x3B: value = (float)dm->observer.lambda_est;   break;
-        case 0x3C: value = (float)dm->observer.i_alpha_last; break; /* 上一拍 α 电流 */
-        case 0x3D: value = (float)dm->observer.i_alpha_last; break;
-        case 0x3E: value = (float)dm->observer.i_beta_last;  break; /* 上一拍 β 电流 */
-        case 0x3F: value = (float)dm->observer.i_beta_last;  break;
+        /* ---- SMO 观测器内部状态（诊断：反电动势/估计电流） ---- */
+        case 0x36: value = (float)dm->observer.e_alpha_final; break; /* 反电动势 α（二级） */
+        case 0x37: value = (float)dm->observer.e_alpha_final; break;
+        case 0x38: value = (float)dm->observer.e_beta_final;  break; /* 反电动势 β（二级） */
+        case 0x39: value = (float)dm->observer.e_beta_final;  break;
+        case 0x3A: value = (float)dm->observer.w_est;         break; /* 估计角速度 ω·Ts */
+        case 0x3B: value = (float)dm->observer.w_est;         break;
+        case 0x3C: value = (float)dm->observer.i_alpha_hat;   break; /* 估计电流 α */
+        case 0x3D: value = (float)dm->observer.i_alpha_hat;   break;
+        case 0x3E: value = (float)dm->observer.i_beta_hat;    break; /* 估计电流 β */
+        case 0x3F: value = (float)dm->observer.i_beta_hat;    break;
         case 0x40: value = dm->r_meas;                       break; /* 启动实测相电阻 Ω */
         case 0x41: value = dm->r_meas;                       break;
         case 0x42: value = dm->l_meas;                       break; /* 启动实测相电感 H */

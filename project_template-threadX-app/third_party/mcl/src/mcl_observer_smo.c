@@ -1,47 +1,17 @@
 /**
- * @file    mcl_observer_smo.c
- * @brief   mcl 电机控制库：滑模观测器（SMO）实现 —— AN1078 式
+ * SMO with current prediction, sliding correction and two EMF filters.
+ * Input convention: previous interval voltage and current sample at its end.
+ * Retains the AN1078 E+Z feedback structure. Consequently Efinal is a
+ * filtered internal state, NOT the full physical back-EMF amplitude.
  *
- * 忠实对齐 Microchip AN1078「Sensorless FOC of PMSM Using SMO」的 smcpos.c：
- *
- *   1. 滑模电流观测器（CalcEstI）：
- *        EstI = F·EstI + G·(V − E − Z)，其中 G = Ts/L、F = 1 − R·Ts/L
- *        电流误差 Ierr = EstI − I（估计值减实测值）。
- *   2. 滑模控制（CalcZalpha/CalcZbeta）：
- *        |Ierr| < MaxSMCError：Z = Kslide·Ierr/MaxSMCError（线性区）
- *        否则              ：Z = ±Kslide（饱和区）
- *        Kslide = SMCGAIN = 0.85（无量纲 0~1），MaxSMCError = 0.005。
- *   3. 反电动势（CalcBEMF）：两级「自适应」低通：
- *        E      += Kslf·(Z − E)        （一级，回喂电流观测器）
- *        Efinal += Kslf·(E − Efinal)   （二级，用于角度）
- *        Kslf = |ω_est|·Ts（= AN1078 的 Ω·THETA_FILTER_CNST），设下限 Kslf_min = lpf·Ts
- *   4. 角度：θ = atan2(−Efinal_α, Efinal_β)
- *        mcl 反电动势约定 e_α=−ωλ·sinθ、e_β=+ωλ·cosθ，故 atan2(−e_α, e_β)=θ，
- *        无需 AN1078 的固定 +90°（CONSTANT_PHASE_SHIFT）。AN1078 中该偏移补偿的是
- *        其内部 E 的 90° 相移，mcl 的 E 回喂/角度约定已等价消去，不额外加。
- *   5. 速度：θ 差分低通（用于自适应滤波系数 w_est）。
- *
- * 与旧实现的关键差异（根治恒速 90° 误差 / 变速 N-S 锁反）：
- *   - 反电动势滤波系数 Kslf 直接 = |ω_est|·Ts，不再额外乘 dt（消除系数过小导致 E 不收敛）；
- *   - Kslf 设下限（lpf·Ts），防 w_est=0 时系数归零 → E 永不更新 → 角度卡死；
- *   - 电流误差符号按 AN1078：Ierr = EstI − I（估计减实测）；
- *   - 两级滤波分工明确：一级 E 回喂电流观测器、二级 Efinal 进 atan2。
- *
- * 量纲约定：float=物理量（rad/s、V、A、s）；定点 per-unit + 角度「圈」(1.0=2π)。
- *
- * ── 精度限制备注 ─────────────────────────────────────────────
- * Q15 变速精度不足：SMO 含高频开关项（±Kslide 饱和滑模）和两级自适应低通，
- * 对量化噪声敏感。16 位 Q15（LSB≈3e-5）在「变速加速段」（反电动势 |e| 快速
- * 从 2V 升至 4V、电流 iq 剧变）下，量化误差累积使估计相位在 ±130° 级振荡
- * （转速仍收敛，但相位不准）。Q31（LSB≈4.7e-10）和 float 位宽足够，变速
- * 闭环正常；恒速下 Q15 也能到 ~1°。
- * 结论：无感闭环优先 Q31/float 或 ORTEGA（ORTEGA 在 Q15 变速下稳定）；
- * SMO 的 Q15 变速相位仅作参考、不保证精度（16 位量化极限，AN1078 用
- * dsPIC 40 位累加器 + 硬件饱和规避，纯 Q15 无法等价）。
+ * Float uses V/A/s/radians; fixed point uses per-unit and angle in turns.
+ * The phase correction H^2/(1+H) is a sliding-regime approximation, so
+ * finite observer gain, parameter error and inverter dead time still need
+ * hardware validation. See docs/smo_validation.md for regression limits.
  */
-
 #include "mcl_observer_smo.h"
 #include "mcl_math.h"
+#include <math.h>
 
 #ifndef MCL_DISABLE_OBSERVER
 
@@ -81,6 +51,21 @@ static void smo_reset(void *impl)
     self->z_alpha = (mcl_scalar)0;
     self->z_beta = (mcl_scalar)0;
     self->theta_prev = (mcl_scalar)0;
+    self->dtheta_prev = (mcl_scalar)0;
+    self->seed_omega = (mcl_scalar)0;
+    self->filter_step = (mcl_scalar)0;
+    self->phase = (mcl_scalar)0;
+    self->dt = (mcl_scalar)0;
+}
+
+void mcl_observer_smo_set_seed_omega(void *impl, mcl_scalar omega)
+{
+    mcl_observer_smo *self = (mcl_observer_smo *)impl;
+    if (self == NULL)
+    {
+        return;
+    }
+    self->seed_omega = omega;
 }
 
 /* AN1078 滑模控制：线性区 Z = Kslide·Ierr/MaxSMCError；饱和区 Z = ±Kslide。
@@ -105,169 +90,142 @@ static mcl_scalar smo_slide_component(mcl_scalar err, mcl_scalar boundary)
     return r;
 }
 
+/* Convert only angles to/from float radians; the electrical model stays in
+ * mcl_scalar. This also avoids representing pi or 2*pi in Q1.15/Q1.31. */
+static float smo_radians(mcl_scalar angle)
+{
+#if defined(MCL_USE_Q15) || defined(MCL_USE_Q31)
+    return MCL_TO_FLOAT(angle) * MCL_TWO_PI;
+#else
+    return angle;
+#endif
+}
+
+static mcl_scalar smo_angle(float angle)
+{
+    while (angle > MCL_PI) { angle -= MCL_TWO_PI; }
+    while (angle < -MCL_PI) { angle += MCL_TWO_PI; }
+#if defined(MCL_USE_Q15) || defined(MCL_USE_Q31)
+    return MCL_FROM_FLOAT(angle * MCL_INV_TWO_PI);
+#else
+    return angle;
+#endif
+}
+
 static void smo_update(void *impl, mcl_scalar v_alpha, mcl_scalar v_beta,
                        mcl_scalar i_alpha, mcl_scalar i_beta, mcl_scalar dt,
                        mcl_scalar *phase_rad, mcl_scalar *speed_rad_s)
 {
     mcl_observer_smo *self = (mcl_observer_smo *)impl;
-    mcl_scalar err_a;
-    mcl_scalar err_b;
-    mcl_scalar z_a;
-    mcl_scalar z_b;
-    mcl_scalar G;   /* Ts/L */
-    mcl_scalar F;   /* 1 − R·Ts/L */
-    mcl_scalar kslf;
-    mcl_scalar kslf_min;
-
-    if (self == NULL)
+    mcl_scalar g, f, z_a, z_b, kslf;
+    float raw, delta, step, target, minimum, direction, ratio, correction;
+    if (self == NULL || dt <= (mcl_scalar)0 ||
+        self->params.inductance <= (mcl_scalar)0)
     {
+        if (phase_rad != NULL) { *phase_rad = (mcl_scalar)0; }
+        if (speed_rad_s != NULL) { *speed_rad_s = (mcl_scalar)0; }
         return;
     }
-
-    /* 1. 电流误差（AN1078 约定：Ierr = EstI − I，估计值减实测值）。 */
     self->dt = dt;
-    err_a = MCL_SUB(self->i_alpha_hat, i_alpha);
-    err_b = MCL_SUB(self->i_beta_hat, i_beta);
 
-    /* 2. 滑模控制：z = Kslide·sat(err/MaxSMCError) */
-    z_a = MCL_MUL(self->params.gain, smo_slide_component(err_a, self->params.boundary));
-    z_b = MCL_MUL(self->params.gain, smo_slide_component(err_b, self->params.boundary));
+    /* Predict i_hat[k] with voltage[k-1] and correction[k-1], THEN compare
+     * with i[k]. Comparing i_hat[k-1] with i[k] injects a false L*di/dt EMF. */
+    g = MCL_DIV(dt, self->params.inductance);
+    f = MCL_SUB(MCL_FROM_FLOAT(1.0f), MCL_MUL(self->params.resistance, g));
+    self->i_alpha_hat = MCL_ADD(MCL_MUL(f, self->i_alpha_hat),
+        MCL_MUL(g, MCL_SUB(MCL_SUB(v_alpha, self->e_alpha), self->z_alpha)));
+    self->i_beta_hat = MCL_ADD(MCL_MUL(f, self->i_beta_hat),
+        MCL_MUL(g, MCL_SUB(MCL_SUB(v_beta, self->e_beta), self->z_beta)));
+    z_a = MCL_MUL(self->params.gain,
+        smo_slide_component(MCL_SUB(self->i_alpha_hat, i_alpha), self->params.boundary));
+    z_b = MCL_MUL(self->params.gain,
+        smo_slide_component(MCL_SUB(self->i_beta_hat, i_beta), self->params.boundary));
     self->z_alpha = z_a;
     self->z_beta = z_b;
 
-    /* 3. 电流观测（CalcEstI）：EstI = F·EstI + G·(V − E − Z)
-          G = Ts/L、F = 1 − R·Ts/L */
-    G = MCL_DIV(dt, self->params.inductance);
-    F = MCL_SUB(MCL_FROM_FLOAT(1.0f),
-                MCL_MUL(MCL_DIV(self->params.resistance, self->params.inductance), dt));
-    self->i_alpha_hat = MCL_ADD(MCL_MUL(F, self->i_alpha_hat),
-        MCL_MUL(G, MCL_SUB(MCL_SUB(v_alpha, self->e_alpha), z_a)));
-    self->i_beta_hat = MCL_ADD(MCL_MUL(F, self->i_beta_hat),
-        MCL_MUL(G, MCL_SUB(MCL_SUB(v_beta, self->e_beta), z_b)));
-
-    /* 4. 反电动势自适应滤波系数（AN1078）：Kslf = Ω·THETA_FILTER_CNST = ω_est·Ts
-          下限 Kslf_min = ENDSPEED_ELECTR·THETA_FILTER_CNST = lpf·Ts
-          （防 w_est 初始 0 → Kslf=0 → 反电动势永不更新 → 角度卡死）
-
-          速度估计：w_est 存「每采样角增量 ω·Ts」（无量纲、远小于 1）。
-          float 下角度为弧度，Δθ 已是 ω·Ts；定点下角度为「圈」，Δθ = ω·Ts/(2π)，
-          故乘 2π（浮点常数）还原为 ω·Ts。这样 Kslf = |w_est| 直接成立，
-          且避开「圈/dt 与 ω_pu 差 2π、2π 定点不可表达」的坑。 */
-    kslf = MCL_ABS(self->w_est);
-    kslf_min = MCL_MUL(self->params.lpf, dt);
-    if (kslf < kslf_min)
+    /* A nonzero signed hint is an explicit open-loop override. The caller
+     * releases it with zero; a single noisy delta must not release it.
+     * w_est is measured from RAW angle, excluding changing compensation. */
+    step = MCL_TO_FLOAT(self->w_est);
+    if (self->seed_omega != (mcl_scalar)0)
     {
-        kslf = kslf_min;
+        step = MCL_TO_FLOAT(self->seed_omega) * MCL_TO_FLOAT(dt);
     }
-
-    /* 5. 一级低通（CalcBEMF 前两行）：E += Kslf·(Z − E)
-          该 E 回喂到上面的电流观测器（CalcEstI 的 e 项用一级 E） */
+    target = step < 0.0f ? -step : step;
+    minimum = MCL_TO_FLOAT(self->params.lpf) * MCL_TO_FLOAT(dt);
+    if (minimum < 0.00001f) { minimum = 0.00001f; }
+    if (target < minimum) { target = minimum; }
+    if (target > 0.5f) { target = 0.5f; }
+    /* Slow bandwidth adaptation avoids the positive feedback between
+     * filter phase lag -> differentiated speed -> filter bandwidth.
+     * At 16 kHz this is about 62.5ms; raw-speed smoothing is about 3ms. */
+    self->filter_step = MCL_ADD(self->filter_step,
+        MCL_MUL(MCL_FROM_FLOAT(0.001f), MCL_SUB(MCL_FROM_FLOAT(target), self->filter_step)));
+    if (self->filter_step < MCL_FROM_FLOAT(minimum))
+    {
+        self->filter_step = MCL_FROM_FLOAT(minimum > 0.5f ? 0.5f : minimum);
+    }
+    kslf = self->filter_step;
     self->e_alpha = MCL_ADD(self->e_alpha, MCL_MUL(kslf, MCL_SUB(z_a, self->e_alpha)));
     self->e_beta = MCL_ADD(self->e_beta, MCL_MUL(kslf, MCL_SUB(z_b, self->e_beta)));
-
-    /* 6. 二级低通（CalcBEMF 后两行）：Efinal += Kslf·(E − Efinal)，用于角度 */
     self->e_alpha_final = MCL_ADD(self->e_alpha_final,
         MCL_MUL(kslf, MCL_SUB(self->e_alpha, self->e_alpha_final)));
     self->e_beta_final = MCL_ADD(self->e_beta_final,
         MCL_MUL(kslf, MCL_SUB(self->e_beta, self->e_beta_final)));
 
-    /* 7. 角度：θ = atan2(−Efinal_α, Efinal_β) + 固定相移
-          mcl 反电动势约定 e_α=−ωλ·sinθ、e_β=+ωλ·cosθ，故 atan2(−e_α, e_β)=θ；
-          两级低通在截止频率处的相移固定为 ~90°，故补 AN1078 的 CONSTANT_PHASE_SHIFT
-          = +90°（float +π/2，定点 +0.25 圈）。 */
-    if (phase_rad != NULL)
-    {
-        mcl_scalar theta = mcl_math_atan2(MCL_NEG(self->e_alpha_final), self->e_beta_final);
-        /* 固定相移补偿（AN1078 CONSTANT_PHASE_SHIFT 等价）：
-           两级反电动势低通在 Kslf=ω·Ts 时，一级（含 e−E 回喂）滞后 atan(1/2)≈26.57°、
-           二级滞后 atan(1)=45°，合计 atan(3)≈71.57°。该滞后与转速无关（自适应 Kslf）。
+    raw = smo_radians(mcl_math_atan2(MCL_NEG(self->e_alpha_final), self->e_beta_final));
+    delta = raw - smo_radians(self->theta_prev);
+    if (delta > MCL_PI) { delta -= MCL_TWO_PI; }
+    if (delta < -MCL_PI) { delta += MCL_TWO_PI; }
+    self->theta_prev = smo_angle(raw);
+    if (delta > MCL_PI / 3.0f) { delta = MCL_PI / 3.0f; }
+    if (delta < -MCL_PI / 3.0f) { delta = -MCL_PI / 3.0f; }
+    self->dtheta_prev = MCL_FROM_FLOAT(delta);
+    self->w_est = MCL_ADD(self->w_est,
+        MCL_MUL(MCL_FROM_FLOAT(0.02f), MCL_SUB(self->dtheta_prev, self->w_est)));
 
-           实测修正：本工程（INVERT=1 采样 + SMO 输入反向后）仍有 -31.24° 净滞后，
-           来自反电动势角度约定与滤波相移的残余偏差。故补偿调整为 71.57°+31.24°=102.81°。 */
-#if defined(MCL_USE_Q15) || defined(MCL_USE_Q31)
-        theta = MCL_ADD(theta, MCL_FROM_FLOAT(0.19880f));
-        if (theta > MCL_FROM_FLOAT(0.5f)) { theta = MCL_SUB(theta, MCL_FROM_FLOAT(1.0f)); }
-        if (theta < MCL_FROM_FLOAT(-0.5f)) { theta = MCL_ADD(theta, MCL_FROM_FLOAT(1.0f)); }
-#else
-        theta += MCL_FROM_FLOAT(1.794373f);   /* +102.81°（71.57° + 31.24° 实测） */
-        if (theta > MCL_PI) { theta -= MCL_TWO_PI; }
-        if (theta < -MCL_PI) { theta += MCL_TWO_PI; }
-#endif
-        *phase_rad = theta;
-
-        /* 8. 速度：w_est = ω·Ts（每采样角增量，无量纲）。角度差分给出 Δθ：
-              float=弧度（=ω·Ts 已正确）；定点=圈（=ω·Ts/(2π)，乘 2π 还原）。
-              一阶平滑降低噪（w_est 用于下一步的 Kslf）。 */
-        {
-            mcl_scalar dtheta = MCL_SUB(theta, self->theta_prev);
-            mcl_scalar w_step;
-#if defined(MCL_USE_Q15) || defined(MCL_USE_Q31)
-            if (dtheta > MCL_FROM_FLOAT(0.5f)) { dtheta = MCL_SUB(dtheta, MCL_FROM_FLOAT(1.0f)); }
-            if (dtheta < MCL_FROM_FLOAT(-0.5f)) { dtheta = MCL_ADD(dtheta, MCL_FROM_FLOAT(1.0f)); }
-            w_step = MCL_FROM_FLOAT(MCL_TO_FLOAT(dtheta) * 6.28318530718f); /* 圈→弧度 ω·Ts */
-#else
-            if (dtheta > MCL_FROM_FLOAT(3.14159265f)) { dtheta = MCL_SUB(dtheta, MCL_FROM_FLOAT(6.2831853f)); }
-            if (dtheta < MCL_FROM_FLOAT(-3.14159265f)) { dtheta = MCL_ADD(dtheta, MCL_FROM_FLOAT(6.2831853f)); }
-            w_step = dtheta;   /* 弧度，已是 ω·Ts */
-#endif
-            self->theta_prev = theta;
-            /* 重平滑：w_est ← 0.95·w_est + 0.05·w_step（抗角度差分噪声） */
-            self->w_est = MCL_ADD(MCL_MUL(self->w_est, MCL_FROM_FLOAT(0.95f)),
-                                  MCL_MUL(w_step, MCL_FROM_FLOAT(0.05f)));
-        }
-    }
-
-    if (speed_rad_s != NULL)
-    {
-        /* w_est = ω·Ts → 除以 dt 还原为归一化速度（ω/W_BASE = ω_pu）。
-           实际闭环中 mcl 用 PLL 估速，此输出当前未使用（mcl.c 传 NULL）。 */
-        *speed_rad_s = (dt > (mcl_scalar)0) ? MCL_DIV(self->w_est, dt) : (mcl_scalar)0;
-    }
+    /* With E fed back in the predictor, the ideal sliding transfer is
+     * Efinal/Etrue = H^2/(1+H), not H^2. In the continuous approximation,
+     * H=1/(1+j*r): lag=atan(r)+atan(r/2)=atan2(3*r,2-r*r).
+     * 71.565 degrees applies ONLY at r=1. Use signed compensation and
+     * remove the pi reversal in back-EMF when omega is negative. */
+    direction = step < 0.0f ? -1.0f : 1.0f;
+    ratio = (step < 0.0f ? -step : step) / MCL_TO_FLOAT(kslf);
+    if (ratio > 10.0f) { ratio = 10.0f; }
+    correction = atan2f(3.0f * ratio, 2.0f - ratio * ratio);
+    self->phase = smo_angle(raw + direction * correction + (step < 0.0f ? MCL_PI : 0.0f));
+    if (phase_rad != NULL) { *phase_rad = self->phase; }
+    if (speed_rad_s != NULL) { *speed_rad_s = MCL_DIV(self->w_est, dt); }
 }
 
 static void smo_seed(void *impl, mcl_scalar flux_alpha, mcl_scalar flux_beta)
 {
     mcl_observer_smo *self = (mcl_observer_smo *)impl;
-    if (self == NULL)
-    {
-        return;
-    }
-
-    /* 预置反电动势方向，使 SMO 输出相位 = 给定磁链相位 φ：
-       SMO 输出 θ_out = atan2(−e_α, e_β) + 102.81°（固定相移 δ=1.7944rad，
-       补偿两级低通在 Kslf=ω·Ts 时的总相移 71.57° + 本工程实测残余 31.24°）。
-       要求 atan2(−e_α, e_β) = φ − δ，即 e 方向 ψ = φ − δ：
-         e = λ·(−sin(φ−δ), cos(φ−δ)) → e_α = f_α·sinδ − f_β·cosδ、e_β = f_α·cosδ + f_β·sinδ
-       δ=1.7944rad → cosδ=−0.22172、sinδ=+0.97512。
-       （旧实现 e=(−f_β, f_α) 未考虑输出 +102.81°：拖动期间 PLL 跟踪 φ+102.81°，
-       切闭环瞬间电流矢量落 φ−167° → 负转矩急停 → 反复重新开环，实测复现。） */
-    /* 关键：seed 入参是「转子磁链矢量」（幅值 = bemf_const = λ），SMO 的 e 状态是
-       「反电动势」（幅值 = ω·λ）。直接填 λ 幅值偏小 ω 倍，但方向是对的；观测器
-       会在驱动期把 e 幅值自行拉回真实反电动势（滑动项 z 驱动），此处不强行缩放
-       （缩放需 w_est/dt，而拖动期 SMO 的 θ 可能与真方向反号 → 缩放会引入 180° 跳，
-       实测复现）。保持方向、让幅值自然收敛。 */
-    self->e_alpha = MCL_ADD(MCL_MUL(MCL_FROM_FLOAT(0.97512f), flux_alpha),
-                            MCL_MUL(MCL_FROM_FLOAT(0.22172f), flux_beta));
-    self->e_beta = MCL_ADD(MCL_MUL(MCL_FROM_FLOAT(-0.22172f), flux_alpha),
-                           MCL_MUL(MCL_FROM_FLOAT(0.97512f), flux_beta));
-    self->e_alpha_final = self->e_alpha;
-    self->e_beta_final = self->e_beta;
-    /* 关键：seed 必须把角度基准 θ_prev 对齐到输出角（去掉 +102.81° 相移），
-       否则切闭环首拍 dtheta=输出角−旧 θ_prev 满跳 102.81° → w_est 差分出
-       垃圾、Kslf 乱（实测 SMO 切换后 t2 转速 52.36→1.64 崩）。
-       i_alpha_hat 在拖动期间已由 update 收敛到实测电流，这里不重置；
-       w_est 归 0（下一拍由 dtheta 重建）。 */
-    self->w_est = (mcl_scalar)0;
-    /* theta_prev 必须 = 输出角（含 +102.81° 相移），与 update 里 dtheta 的
-       θ 同一口径：update 里 θ = atan2(−e_α,e_β)+δ 再差分。seed 的 e 已预旋
-       δ，故 atan2(−e_α,e_β) = φ−δ，+δ = φ（seed 目标）。设成 φ 使首拍
-       dtheta≈真实角增量，避免跳 δ=1.794rad（实测 w_est 爆到 0.806、obs 卡死）。 */
+    float omega, theta, magnitude, direction, angle;
+    if (self == NULL) { return; }
+    omega = MCL_TO_FLOAT(self->seed_omega);
+    direction = omega < 0.0f ? -1.0f : 1.0f;
+    theta = smo_radians(mcl_math_atan2(flux_beta, flux_alpha));
+    magnitude = sqrtf(MCL_TO_FLOAT(flux_alpha) * MCL_TO_FLOAT(flux_alpha) +
+                      MCL_TO_FLOAT(flux_beta) * MCL_TO_FLOAT(flux_beta)) * omega;
+    /* Consistent two-stage steady-state seed at |omega|/cutoff=1:
+     * E1/Etrue=1/(2+j), E2/Etrue=1/((1+j)(2+j)), Z=Etrue-E1.
+     * Do not seed both filters to the full physical EMF. */
+    angle = theta - direction * 0.46364761f;
+    self->e_alpha = MCL_FROM_FLOAT(-magnitude * 0.44721360f * sinf(angle));
+    self->e_beta = MCL_FROM_FLOAT(magnitude * 0.44721360f * cosf(angle));
+    angle = theta - direction * 1.24904577f;
+    self->e_alpha_final = MCL_FROM_FLOAT(-magnitude * 0.31622777f * sinf(angle));
+    self->e_beta_final = MCL_FROM_FLOAT(magnitude * 0.31622777f * cosf(angle));
+    self->z_alpha = MCL_SUB(MCL_FROM_FLOAT(-magnitude * sinf(theta)), self->e_alpha);
+    self->z_beta = MCL_SUB(MCL_FROM_FLOAT(magnitude * cosf(theta)), self->e_beta);
+    self->w_est = MCL_MUL(self->seed_omega, self->dt);
+    self->filter_step = MCL_ABS(self->w_est);
+    if (self->filter_step > MCL_FROM_FLOAT(0.5f)) { self->filter_step = MCL_FROM_FLOAT(0.5f); }
     self->theta_prev = mcl_math_atan2(MCL_NEG(self->e_alpha_final), self->e_beta_final);
-    self->theta_prev = MCL_ADD(self->theta_prev, MCL_FROM_FLOAT(1.794373f));
-    if (self->theta_prev > MCL_PI) { self->theta_prev = MCL_SUB(self->theta_prev, MCL_TWO_PI); }
-    if (self->theta_prev < MCL_NEG(MCL_PI)) { self->theta_prev = MCL_ADD(self->theta_prev, MCL_TWO_PI); }
+    self->phase = smo_angle(theta);
+    self->dtheta_prev = self->w_est;
 }
-
 const mcl_observer_ops mcl_observer_smo_ops = {
     .init = smo_init,
     .reset = smo_reset,

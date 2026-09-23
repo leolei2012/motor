@@ -4,7 +4,7 @@
 #include "platform.h"
 
 #include "mcl.h"
-#include "mcl_observer_ortega.h"
+#include "mcl_observer_smo.h"
 
 /**
  * @file drv_motor.h
@@ -18,7 +18,7 @@
 struct drv_motor
 {
     mcl motor;                    /**< mcl 电机对象（算法核心） */
-    mcl_observer_ortega observer; /**< Ortega 磁链观测器实例（λ²−|λ|² 幅值反馈，角度自动收敛） */
+    mcl_observer_smo observer;    /**< SMO 滑模观测器实例（AN1078 式，高速无感更稳） */
     float r_meas;               /**< 启动实测相电阻 Ω（0=未测） */
     float l_meas;               /**< 启动实测相电感 H（0=未测） */
     float ia_now;               /**< 最近一拍 A 相电流 A（已减零漂，供调试观测） */

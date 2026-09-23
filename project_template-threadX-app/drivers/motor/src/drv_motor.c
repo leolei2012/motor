@@ -129,16 +129,18 @@ static void drv_motor_pwm_set_duty(void *ctx, mcl_scalar da, mcl_scalar db, mcl_
      * mcl 的 da/db/dc 是 SVPWM 输出后的相占空比，范围 [0, max_duty]（0=全低，1=全高）。
      * 直接映射到中心对齐 PWM 的比较值 [0, PWM_HALF_PERIOD]。
      */
-    uint16_t cmp_a = (uint16_t)((float)da * (float)PWM_HALF_PERIOD);
-    uint16_t cmp_b = (uint16_t)((float)db * (float)PWM_HALF_PERIOD);
-    uint16_t cmp_c = (uint16_t)((float)dc * (float)PWM_HALF_PERIOD);
-
-    /* 保险钳位：异常/NaN/超限输入不得写出大于 ARR 的比较值（CCR>ARR 输出常开，
-       曾因垃圾占空比导致过流）。 */
-    if (cmp_a > PWM_HALF_PERIOD) { cmp_a = PWM_HALF_PERIOD; }
-    if (cmp_b > PWM_HALF_PERIOD) { cmp_b = PWM_HALF_PERIOD; }
-    if (cmp_c > PWM_HALF_PERIOD) { cmp_c = PWM_HALF_PERIOD; }
-
+    uint16_t cmp_a;
+    uint16_t cmp_b;
+    uint16_t cmp_c;
+    if (!(da >= 0.0f)) { da = 0.0f; }
+    if (!(db >= 0.0f)) { db = 0.0f; }
+    if (!(dc >= 0.0f)) { dc = 0.0f; }
+    if (da > 1.0f) { da = 1.0f; }
+    if (db > 1.0f) { db = 1.0f; }
+    if (dc > 1.0f) { dc = 1.0f; }
+    cmp_a = (uint16_t)((float)da * (float)PWM_HALF_PERIOD);
+    cmp_b = (uint16_t)((float)db * (float)PWM_HALF_PERIOD);
+    cmp_c = (uint16_t)((float)dc * (float)PWM_HALF_PERIOD);
     hal_tim1_set_duty_abc(cmp_a, cmp_b, cmp_c);
 }
 
@@ -227,81 +229,71 @@ int drv_motor_init(struct drv_motor *self)
     cfg.current_pid.i_min   = -1.0f;
     cfg.current_pid.i_max   = 1.0f;
 
-    /* —— 速度环 PID：mcl 的速度环误差量纲是 rpm（fb_rpm），老工程 0.5/2.0
-          是按 A/(rad/s) 整定的，直接用于 rpm 大 9.55× → 切闭环 50rpm 误差瞬间
-          把 iq_ref 打到 ±1.5A 饱和 → 加速→超调(实测冲到 191rpm)→急刹→低速→
-          再饱和，形成 1-2Hz 大摆幅极限环。折算到 rpm 并再调柔：
-          Kp=0.02 A/rpm（50rpm 误差→1.0A，穿越 ~6Hz）、Ki=0.1（零点 ~0.8Hz）。 */
+    /* 速度环输出为 A，误差为机械 rpm。取消对未滤波估速的差分放大；
+       闭环电流上限与既有 3A 拖动一致，避免 1.5A 上限拖不动 800rpm 风扇。
+       这些增益须结合实际惯量/负载继续验证。 */
     cfg.speed_pid.kp = 0.005f;
-    cfg.speed_pid.ki = 0.002f;   /* 恢复小 ki：纯 PD(ki=0) 时 i_term 预置 1A 残留成永久偏置，
-                                    把转速顶到 480rpm 而非 300。ki=0.002 让 i_term 收敛到正确
-                                    稳态值(iq≈0.3A)，消静差又不致积分慢摆。 */
-    cfg.speed_pid.kd = 0.5f;     /* 微分阻尼：消除 195~352rpm 的剩余摆动。d_term=kd×(err−prev_err)，
-                                    未除 dt(1ms)，摆动 ±80rpm/周期~4s → 每ms误差变~0.08rpm，
-                                    kd=0.5 → ~0.04A 阻尼（温和）。 */
-    cfg.speed_pid.out_min = -1.5f;
-    cfg.speed_pid.out_max = 1.5f;
-    cfg.speed_pid.i_min   = -1.5f;
-    cfg.speed_pid.i_max   = 1.5f;
-
-    /* —— PLL（kp 直接耦合输入相位噪声到相位速率 kp·err：kp=80 时 0.5rad 抖动
-          → ±40rad/s 帧速率摆动，电流矢量被甩来甩去。VESC 式低 kp 高阻尼折中：
-          kp=40、ki=1000 → ωn≈31.6rad/s≈5Hz、ζ≈0.63，速度噪声 ≈1/8 of ki=8000。 */
-    cfg.pll_kp = 40.0f;
-    cfg.pll_ki = 200.0f;  /* 切闭环后 PLL 速度估计超调（实测冲到 400rpm=209rad/s，真实转子仅 300rpm），
-                            速度环据此反向加大 iq 刹停→掉速→重开环极限环。降到 200 让速度估计
-                            更平滑，减小与真实转速的偏差（对齐 VESC 低速低带宽）。 */
-
+    cfg.speed_pid.ki = 0.02f;
+    cfg.speed_pid.kd = 0.0f;
+    cfg.speed_pid.out_min = -3.0f;
+    cfg.speed_pid.out_max = 3.0f;
+    cfg.speed_pid.i_min   = -3.0f;
+    cfg.speed_pid.i_max   = 3.0f;
+    cfg.speed_ramp_rpm_s  = 500.0f;           /* 闭环指令斜坡 500 rpm/s：300→1000 约 1.4s */
+    /* PLL: wn=100rad/s (~16Hz), damping=1. The former 40/200 setting
+       lagged accelerating/decelerating rotor phase enough to cause re-drag
+       in the loaded plant regression. Keep speed-loop bandwidth lower. */
+    cfg.pll_kp = 200.0f;
+    cfg.pll_ki = 10000.0f;
     /* —— 无感自动开环启动参数（VESC 式：锁定 → 斜坡 → 拖动 → 切 SMO 闭环）—— */
-    cfg.openloop_rpm        = 300.0f;        /* 开环拖动转速上限 300rpm（切闭环反电动势充足）。
-                                                历史教训：50rpm 时反电动势 ωλ=2.6×7.17mWb≈0.19V，
-                                                相对电阻压降 R·i≈0.95V（2A）信噪仅 1:5，Ortega 纯积分
-                                                观测器角度被 R·i 主导 → 轻微 R 误差就让磁链相位漂移
-                                                ~50rad/s、~64ms 内 180° 翻转失锁。300rpm 反电动势
-                                                ≈1.13V 与 R·i 相当，观测器有足够信号锁定。 */
-    cfg.openloop_drag_q     = 2.0f;           /* 开环拖动 q 轴电流 2A（锁定与拖动共用，加强对齐） */
-    cfg.openloop_time_lock  = 0.2f;           /* 锁定对齐时间 0.2s（加长，确保转子可靠对齐到稳定平衡点） */
-    cfg.openloop_time_ramp  = 0.3f;           /* 拖动斜坡 0.3s（原默认 0.1s 太短：转子从锁定位
-                                                到拖动位要摆 ~90°，摆动未稳就切闭环 → 帧超前真实
-                                                磁链 → 负转矩急停。加长让摆动衰减） */
-    cfg.openloop_time       = 0.3f;           /* 拖动匀速保持 0.3s（原默认 0.05s，同上加长等转子稳定） */
-    cfg.openloop_seed_angle = 0.78539816f;    /* seed 负载角补偿 = π/4 = 45°（对齐 VESC foc 低速段
-                                                 seed：phase + SIGN(duty)*M_PI/4）。历史教训：曾用 0°
-                                                 （无补偿，观测器从磁场角起步 → 磁链方向超前真实转子 →
-                                                 PLL 估速偏高 ~30% → 速度环慢摆/低速失锁）；也曾按
-                                                 「转子超前 90°」误 seed 反电动势方向导致 100ms 必崩。
-                                                 VESC 实测用 45° 折中：既补偿 I/F 拖动滑差，又不致 90°
-                                                 完全错位。 */
+    cfg.openloop_rpm        = 300.0f;        /* 开环只拖到 300rpm，切闭环后由速度环升到 800rpm */
+    cfg.openloop_drag_q     = 3.0f;           /* 开环拖动 q 轴电流 3A */
+    cfg.openloop_time_lock  = 0.0f;           /* 锁定对齐时间 0s（不锁定：锁定把转子吸到固定角，
+                                                可能停在 180° 不稳点 → 斜坡起步即失步（实测每次
+                                                上电牵入结果随机）。改为 15rpm 场频直接牵入
+                                                ——应用层 IF 测试已验证的可靠方式） */
+    cfg.openloop_time_ramp  = 1.5f;           /* 拖动斜坡 1.5s（原 0.3s 太陡：转子+风扇的惯量要求
+                                                J·α+风扇负载超过拖动转矩上限，转子落后磁场、打滑后
+                                                I/F 平均转矩≈0 再也牵不回来（实测反电动势停在
+                                                0.43~0.7V = 转子 100~200rpm 爬行）。配合斜坡从 ~0
+                                                起步（mcl.c 已去掉 10% 下限），1.5s → α≈279rad/s²
+                                                电角，3A 下裕量充足） */
+    cfg.openloop_time       = 0.05f;          /* 拖动匀速保持 0.05s（原 0.3s：斜坡结束磁场加速度突变，
+                                                转子负载角摆动，I/F 无阻尼、摆动发散失步——实测斜坡
+                                                段转子已到 800rpm（反电动势 2.86V），匀速段却掉到
+                                                ~200rpm（反电动势 0.75V）。斜坡一结束立刻切闭环，
+                                                让 PLL/速度环阻尼转子摆动） */
+    cfg.openloop_seed_angle = 1.5708f;           /* 已弃用：SMO 路径的 seed 角度改取「拖动期已收敛的
+                                                   观测器输出角」（≈转子磁链角，负载无关）——带载 I/F
+                                                   的转子超前量随负载变化，固定角 0°/π/2 都无法覆盖。
+                                                   字段保留供其他观测器使用。 */
 
-    /* —— 保护阈值（UserData_Motor.h safe 段）—— */
-    /*
-     * 开环 VF 调试阶段：先禁用所有保护，排除保护误触发导致的"电机不转"。
-     * 验证 PWM 输出 + 接线正确后再恢复保护（enabled = MCL_PROTECT_ALL）。
-     */
-    cfg.limits.enabled      = 0u;                 /* TODO: 调试期禁用，验证后恢复 */
+    /* 无温度传感器，不启用假温度保护。开环收敛失败仍由 mcl 独立超时报堵转。 */
+    cfg.limits.enabled = MCL_PROTECT_OVERCURRENT | MCL_PROTECT_OVERVOLTAGE |
+                         MCL_PROTECT_UNDERVOLTAGE;
+    cfg.fault_stop_time = 0.0f; /* 锁存故障，保留诊断现场，显式清故障后才能重启 */
     cfg.limits.overcurrent  = 4.0f;               /* 过流 4A（与 D/Qcur_MAX 对齐） */
-    cfg.limits.overvoltage  = 30.0f;              /* VBUS_MAX=30V */
-    cfg.limits.undervoltage = 10.0f;              /* VBUS_MIN=10V */
+    cfg.limits.overvoltage  = 48.0f;              /* VBUS_MAX=48V */
+    cfg.limits.undervoltage = 8.0f;               /* VBUS_MIN=8V */
     cfg.limits.overtemp     = 80.0f;              /* Temp_MAX=80℃ */
     cfg.limits.temp_derate_start = 80.0f;         /* 简化：80℃ 开始降额 */
     cfg.limits.stall_speed  = 1.0f;               /* 堵转转速 rad/s（保守默认） */
     cfg.limits.stall_time   = 0.5f;               /* 堵转时间 0.5s */
 
-    /* Ortega 磁链观测器（VESC 式，λ²−|λ|² 双向幅值反馈）参数：
-       角度 = atan2(λ_β, λ_α) 直接是转子磁链角（=FOC d 轴），幅值反馈
-       err·λ_r 会让 λ 自动收敛到真实磁链（初始角度/R/L 偏差都会自校正），
-       没有 SMO 那种「预设相移 δ、口径一变就翻 90°/180°」的坑。
-       R/L 初值用配置值，启动后由 drv_motor_measure_rl() 实测回填。 */
-    mcl_observer_ortega_params op;
-    op.lambda     = cfg.bemf_const;         /* 7.17mWb 永磁磁链 */
-    op.resistance = cfg.phase_resistance;   /* 0.475Ω（相值=线 0.95/2） */
-    op.inductance = cfg.phase_inductance;   /* 0.80mH（相电感 Lq） */
-    op.gain       = 750000.0f;               /* 观测器增益 γ = 600/L = 600/0.0008（VESC 注释推荐量级，
-                                               对应 m_gamma 未 ×4）。恢复非对称 clamp 后必须回到此量级
-                                               压住积分慢漂；100~180000 太弱致慢漂掉速，750000 实测最佳。 */
+    /* SMO: gain in V, boundary in A. Retain 10V/0.5A: the local correction
+       slope is 20 ohm and dt*(R+gain/boundary)/L ~= 1.60 (<2).
+       Efinal is internally filtered (~0.316*omega*flux at steady state);
+       it must not be compared directly with the full physical back-EMF. */
+    mcl_observer_smo_params op;
+    op.resistance = cfg.phase_resistance;   /* 0.475Ω 相电阻 */
+    op.inductance = cfg.phase_inductance;   /* 0.80mH 相电感 */
+    op.flux       = cfg.bemf_const;         /* 7.17mWb 永磁磁链 */
+    op.gain       = 10.0f;                  /* 滑模增益 Kslide=电压上限 V，需 > ωλ_max ≈7.5V */
+    op.lpf        = 6.28f;                  /* 最低电气转速 1Hz（=2π rad/s，滤波系数下限） */
+    op.boundary   = 0.5f;                   /* 线性滑模区电流误差 A（=额定 4A 的 1/8） */
 
     if (mcl_init(&self->motor, &cfg, &s_mcl_hal, self,
-                 &mcl_observer_ortega_ops, &self->observer, &op) != MCL_OK)
+                 &mcl_observer_smo_ops, &self->observer, &op) != MCL_OK)
     {
         return -1;
     }
@@ -457,21 +449,16 @@ int drv_motor_set_openloop_if(struct drv_motor *self, float current, float speed
     return 0;
 }
 
-/** 观测器输出角（与 ortega_update 一致：atan2(λ_β, λ_α)，λ_r = x − L·i，
-    即转子磁链角 = FOC d 轴，无任何固定相移/经验修正角）。 */
+/** 与控制实际使用的 SMO 补偿角一致，不在驱动层重复固定角度补偿。 */
 static float drv_observer_output_angle(struct drv_motor *self)
 {
-    float la = (float)self->observer.x1
-             - (float)self->observer.params.inductance * (float)self->observer.i_alpha_last;
-    float lb = (float)self->observer.x2
-             - (float)self->observer.params.inductance * (float)self->observer.i_beta_last;
-    return atan2f(lb, la);
+    return (float)self->observer.phase;
 }
-
 /** 上一拍开环阶段（切换捕获用） */
 static uint8_t s_prev_ol_stage = 0u;
 
-/** 切换后逐拍采集：对数间隔偏移（1,2,4,...,8192 拍 @16kHz = 62.5µs~512ms） */
+/** 切换后逐拍采集：对数间隔偏移（1,2,4,...,8192 拍 @16kHz = 62.5µs~512ms）。
+    覆盖整段闭环存活期（死亡点 ~150ms~1s 不定），抓撒手瞬态 + 转子摆动 + 掉速全过程。 */
 static const uint32_t s_cap2_off[14] = {1u, 2u, 4u, 8u, 16u, 32u, 64u, 128u, 256u, 512u, 1024u, 2048u, 4096u, 8192u};
 static uint8_t  s_cap2_idx   = 0u;   /**< 下一个待采集偏移索引 */
 static uint8_t  s_cap2_armed = 0u;   /**< 1=本轮闭环采集进行中 */
@@ -527,13 +514,13 @@ void drv_motor_control_isr(struct drv_motor *self)
             if (s_cap2_idx < 14u && s_cap2_tick == s_cap2_off[s_cap2_idx])
             {
                 self->cap2_frame[s_cap2_idx] = (float)self->motor.phase_rad;
-                self->cap2_obs[s_cap2_idx]   = drv_observer_output_angle(self);
-                self->cap2_spd[s_cap2_idx]   = (float)self->motor.speed_rad_s;
-                self->cap2_va[s_cap2_idx]    = (float)self->motor.v_alpha_prev;
-                self->cap2_vb[s_cap2_idx]    = (float)self->motor.v_beta_prev;
-                self->cap2_x1[s_cap2_idx]    = (float)self->observer.x1;
-                self->cap2_x2[s_cap2_idx]    = (float)self->observer.x2;
-                self->cap2_lam[s_cap2_idx]   = (float)self->observer.lambda_est;
+                self->cap2_obs[s_cap2_idx]   = (float)self->ia_now;                  /* 复用：i_α A（实测） */
+                self->cap2_spd[s_cap2_idx]   = (float)((self->ia_now + 2.0f * self->ib_now) * 0.57735027f); /* 复用：i_β A（实测） */
+                self->cap2_va[s_cap2_idx]    = (float)self->observer.i_alpha_hat;   /* 复用：i_hat_α A（SMO 估计） */
+                self->cap2_vb[s_cap2_idx]    = (float)self->observer.i_beta_hat;    /* 复用：i_hat_β A */
+                self->cap2_x1[s_cap2_idx]    = (float)self->observer.e_alpha_final; /* SMO 反电动势 α */
+                self->cap2_x2[s_cap2_idx]    = (float)self->observer.e_beta_final; /* SMO 反电动势 β */
+                self->cap2_lam[s_cap2_idx]   = (float)self->observer.z_alpha;  /* 复用：SMO 滑模输出 z_α */
                 s_cap2_idx++;
             }
             if ((float)self->motor.speed_rad_s < self->cap2_min_spd)

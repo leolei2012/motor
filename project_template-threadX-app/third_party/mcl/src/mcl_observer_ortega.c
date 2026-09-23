@@ -48,6 +48,10 @@ static void ortega_reset(void *impl)
     self->lambda_est = (mcl_scalar)0;
     self->i_alpha_last = (mcl_scalar)0;
     self->i_beta_last = (mcl_scalar)0;
+    /* 电阻自适应：初始 r_est_state = 配置相电阻，r_est 随温度漂移由观测器实时修正 */
+    self->r_est_state = self->params.resistance;
+    self->r_est = self->params.resistance;
+    self->speed = (mcl_scalar)0;
 }
 
 static void ortega_update(void *impl, mcl_scalar v_alpha, mcl_scalar v_beta,
@@ -55,7 +59,7 @@ static void ortega_update(void *impl, mcl_scalar v_alpha, mcl_scalar v_beta,
                           mcl_scalar *phase_rad, mcl_scalar *speed_rad_s)
 {
     mcl_observer_ortega *self = (mcl_observer_ortega *)impl;
-    mcl_scalar R = self->params.resistance;
+    mcl_scalar R = self->params.resistance;   /* 固定 R：电阻自适应回填实测导致磁链/速度震荡，暂回退 */
     mcl_scalar L = self->params.inductance;
     mcl_scalar lambda = self->params.lambda;
     mcl_scalar gamma_half;
@@ -143,6 +147,38 @@ static void ortega_update(void *impl, mcl_scalar v_alpha, mcl_scalar v_beta,
     self->i_alpha_last = i_alpha;
     self->i_beta_last = i_beta;
 
+    /* 电阻自适应观测器（对齐 VESC mcpwm_foc.c 4160-4173，论文 DOI 10.1002/acs.2587
+       「An adaptive flux observer for the PMSM」）：基于功率平衡实时估计相电阻，
+       抵消绕组温升导致的 R 慢漂（这是无温度传感器下「1 分钟级磁链慢漂→掉速」的根因）。
+       公式：
+         i_abs² = iα² + iβ²
+         r_est = r_est_state − 0.5·g·L·i_abs²
+         r_dot = −g·( r_est·i_abs² + ω·(iβ·x1 − iα·x2) − (iα·vα + iβ·vβ) )
+         r_est_state += r_dot·dt，并 clamp 到 [R·0.5, R·2]
+       g = 0.00002（VESC 默认），ω = self->speed（电气 rad/s，mcl.c 在 update 前写入）。 */
+    {
+        mcl_scalar g = MCL_FROM_FLOAT(0.00002f);
+        mcl_scalar i_abs_sq = MCL_ADD(MCL_MUL(i_alpha, i_alpha), MCL_MUL(i_beta, i_beta));
+        mcl_scalar r_est_now = MCL_SUB(self->r_est_state,
+            MCL_MUL(MCL_MUL(MCL_FROM_FLOAT(0.5f), MCL_MUL(g, L)), i_abs_sq));
+        mcl_scalar p_term1 = MCL_MUL(r_est_now, i_abs_sq);
+        mcl_scalar p_term2 = MCL_MUL(self->speed,
+            MCL_SUB(MCL_MUL(i_beta, self->x1), MCL_MUL(i_alpha, self->x2)));
+        mcl_scalar p_term3 = MCL_ADD(MCL_MUL(i_alpha, v_alpha), MCL_MUL(i_beta, v_beta));
+        mcl_scalar r_dot = MCL_NEG(MCL_MUL(g,
+            MCL_SUB(MCL_ADD(p_term1, p_term2), p_term3)));
+        self->r_est_state = MCL_ADD(self->r_est_state, MCL_MUL(r_dot, dt));
+
+        /* clamp r_est_state 到 [0.5R_nom, 2R_nom]，防发散 */
+        {
+            mcl_scalar lo = MCL_MUL(self->params.resistance, MCL_FROM_FLOAT(0.5f));
+            mcl_scalar hi = MCL_MUL(self->params.resistance, MCL_FROM_FLOAT(2.0f));
+            if (self->r_est_state < lo) { self->r_est_state = lo; }
+            if (self->r_est_state > hi) { self->r_est_state = hi; }
+        }
+        self->r_est = r_est_now;
+    }
+
     if (phase_rad != NULL)
     {
         *phase_rad = mcl_math_atan2(lambda_beta, lambda_alpha);
@@ -165,6 +201,16 @@ static void ortega_seed(void *impl, mcl_scalar flux_alpha, mcl_scalar flux_beta)
     self->x1 = MCL_ADD(flux_alpha, MCL_MUL(self->params.inductance, self->i_alpha_last));
     self->x2 = MCL_ADD(flux_beta, MCL_MUL(self->params.inductance, self->i_beta_last));
     self->lambda_est = self->params.lambda;
+}
+
+void mcl_observer_ortega_set_speed(void *impl, mcl_scalar speed)
+{
+    mcl_observer_ortega *self = (mcl_observer_ortega *)impl;
+    if (self == NULL)
+    {
+        return;
+    }
+    self->speed = speed;
 }
 
 const mcl_observer_ops mcl_observer_ortega_ops = {

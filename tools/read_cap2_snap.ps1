@@ -36,7 +36,7 @@ Write-Output ("switch_count={0}  survival_ticks={1} ({2} ms)  valid_n={3}" -f $s
 Write-Output ("min_spd={0:F4} rad/s ({1} rpm)  max_iq={2:F4} A" -f $mn,($mn*60/(2*[math]::PI)),$mx)
 Write-Output ""
 $offs = @(1,2,4,8,16,32,64,128,256,512,1024,2048,4096,8192)
-Write-Output ("{0,-3} {1,6} {2,10} {3,10} {4,9} {5,10} {6,10} {7,11} {8,11} {9,10}" -f "k","off","frame","obs","spd","va","vb","x1","x2","lam")
+Write-Output ("{0,-3} {1,6} {2,10} {3,9} {4,9} {5,9} {6,9} {7,11} {8,11} {9,10}" -f "k","off","frame","ia","ib","iha","ihb","e_a","e_b","za")
 for($k=0; $k -lt 14; $k++){
   $base = 0x2060 + $k*16
   $frame = F32 $base

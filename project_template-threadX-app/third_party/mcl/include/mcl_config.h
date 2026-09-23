@@ -110,6 +110,8 @@ typedef struct
                                      定点下 kp/ki 须 <1（见注意事项 5）。 */
     mcl_pid_params speed_pid;   /**< 速度环 PID。输出是 iq 参考（电流），
                                      out_min/max 按电流幅值。 */
+    mcl_scalar speed_ramp_rpm_s; /**< 速度指令斜坡，机械 rpm/s。0 = 不斜坡，
+                                      速度环直接跟踪 speed_ref。 */
     mcl_pid_params pos_pid;     /**< 位置环 PID。输出是速度参考（rpm）。 */
 
     /* ==================== 反馈 ==================== */

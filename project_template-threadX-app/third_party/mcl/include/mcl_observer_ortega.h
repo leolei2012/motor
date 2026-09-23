@@ -46,12 +46,22 @@ typedef struct
     mcl_scalar lambda_est;             /**< 转子磁链幅值估计 */
     mcl_scalar i_alpha_last;           /**< 上次 α 电流（seed 换算用） */
     mcl_scalar i_beta_last;            /**< 上次 β 电流（seed 换算用） */
+    mcl_scalar r_est;                  /**< 估计相电阻 Ω（电阻自适应观测器输出，随温度漂移修正） */
+    mcl_scalar r_est_state;            /**< 电阻自适应积分状态 */
+    mcl_scalar speed;                  /**< 电气角速度 rad/s（mcl.c 在 update 前写入，电阻自适应用） */
 } mcl_observer_ortega;
 
 /**
  * @brief ORTEGA 观测器接口（注入 mcl_observer 载体用）
  */
 extern const mcl_observer_ops mcl_observer_ortega_ops;
+
+/**
+ * @brief 写入当前电气角速度（电阻自适应观测器用，mcl.c 在 update 前调用）
+ * @param impl  观测器实例（mcl_observer_ortega*）
+ * @param speed 电气角速度 rad/s
+ */
+void mcl_observer_ortega_set_speed(void *impl, mcl_scalar speed);
 
 #ifdef __cplusplus
 }

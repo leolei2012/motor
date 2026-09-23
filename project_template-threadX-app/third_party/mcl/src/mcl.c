@@ -7,11 +7,16 @@
  */
 
 #include "mcl.h"
+#include "mcl_observer_ortega.h"
+#include "mcl_observer_smo.h"
 
 /* 60/(2π)：rad/s → rpm 换算系数（TODO 定点：需缩放） */
 #define MCL_RPM_PER_RAD_S  9.5492966f
 /* 2π/60：rpm → rad/s 换算系数 */
 #define MCL_RAD_PER_S_PER_RPM  0.1047197551f
+#define MCL_SWITCH_BLEND_TIME 0.5f
+#define MCL_SMO_LOCK_TIME     0.02f
+#define MCL_SMO_WAIT_TIME     0.5f
 
 /* ============================ 角度回绕 ============================ */
 
@@ -57,19 +62,23 @@ static mcl_scalar mcl_wrap_full_turn(mcl_scalar x)
 /* ============================ 控制节拍内部实现 ============================ */
 
 /**
- * 无感自动开环→闭环切换（VESC 式，简化）。
- *
- * 仅在 sensorless + 闭环控制模式（CURRENT/SPEED/POSITION）下生效：
- * 估计速度低于开环阈值持续 openloop_hyst 后进入开环，按
- * 锁定(t_lock，id 对齐预定位) → 斜坡(t_ramp) → 匀速(t_const) 三段式
- * 拖动；期间用开环积分相位覆盖观测器相位，并把观测器磁链状态 seed
- * 到开环相位 +90°（空载 I/F 稳态转子超前磁场约 90°），退出时观测器
- * 从转子附近初值继续跟踪，实现平滑切换。
- *
- * 开环阶段写入 self->ol_stage：1=锁定(对齐)，2=拖动，0=未开环；
- * 电流环据此在锁定/拖动阶段分别用 id 对齐 / iq 拖动。
+ * Sensorless startup: align -> ramp -> drag -> observer qualification.
+ * During drag the observer runs freely with a signed bandwidth hint.
+ * Handover releases the hint, seeds PLL speed history consistently, and
+ * removes the control-frame offset gradually instead of jumping its angle.
+ * ol_stage: 1=alignment, 2=drag, 0=closed loop (including handover blend).
  */
 #ifndef MCL_DISABLE_OBSERVER
+
+/* 若观测器是 SMO，写入 seed 用的开环角速度（Ortega 无此字段，仅按 ops 判断）。 */
+static void mcl_observer_seed_omega_set(const mcl_observer *obs, mcl_scalar omega)
+{
+    if (obs != NULL && obs->ops == &mcl_observer_smo_ops)
+    {
+        mcl_observer_smo_set_seed_omega(obs->impl, omega);
+    }
+}
+
 static void mcl_openloop_auto(mcl *self, mcl_scalar *phase, mcl_scalar *speed)
 {
     const mcl_scalar dt = self->dt;
@@ -90,8 +99,15 @@ static void mcl_openloop_auto(mcl *self, mcl_scalar *phase, mcl_scalar *speed)
     mcl_scalar time_fwd;
     mcl_scalar dir;
     mcl_scalar sign;
-    mcl_scalar s;
-    mcl_scalar c;
+    mcl_scalar s_ramp;
+    mcl_scalar c_ramp;
+
+    /* Zero explicitly disables automatic startup. */
+    if (self->cfg.openloop_rpm <= (mcl_scalar)0 || total <= (mcl_scalar)0)
+    {
+        self->ol_stage = 0u;
+        return;
+    }
 
     /* 开环转速上限（固定值）。
        TODO：VESC 按 |iq| 自适应（电流越大转速越高，I/F），依赖 openloop_rpm_low /
@@ -136,33 +152,54 @@ static void mcl_openloop_auto(mcl *self, mcl_scalar *phase, mcl_scalar *speed)
     if (self->ol_hyst_timer >= self->cfg.openloop_hyst && self->ol_timer <= (mcl_scalar)0)
     {
         self->ol_timer = total;
-        self->ol_phase = *phase;   /* 从当前估计相位继续，保证相位连续 */
+        self->ol_phase = self->phase_rad; /* resume from the actual control frame */
+        self->ol_lock_timer = (mcl_scalar)0;
+        self->ol_wait_timer = (mcl_scalar)0;
+        self->switch_blend_timer = (mcl_scalar)0;
+        self->switch_phase_offset = (mcl_scalar)0;
     }
 
     /* 6. 开环运行 */
     if (self->ol_timer > (mcl_scalar)0)
     {
-        /* 三段式时间序列：锁定(转速0，id 对齐) → 斜坡(0→max) → 匀速(max)。
-           重开环（已启动过一次）时跳过锁定段：直接匀速 IF 拖行，避免掉速重入时
-           「转速=0 停转锁定」造成用户看到的「突然停」（对齐 VESC 低速段不重对齐）。 */
+        /* 三段式时间序列：锁定(转速0，id 对齐) → 斜坡(15rpm→max) → 匀速(max)。
+           首次与重开环同一条时间轴（t_lock=0 时不锁定）：
+           牵入机制（应用层 IF 测试已验证）——磁场从静止以 ≤15rpm 起步，转子从
+           任意位置都能被牵入；固定 0.1×openloop_rpm（80rpm）的旧地板跳变太大，
+           转子跟不上 → 打滑后 I/F 平均转矩≈0 再也牵不回来（实测反电动势停在
+           0.43~0.7V = 转子 100~200rpm 爬行）。重开环同样走斜坡：掉速后的转子
+           从低转速重新被 15rpm→800rpm 斜坡牵回（旧「重开环直接全速」在转子
+           掉到 ~200rpm 后无法牵入，只会原地爬行）。 */
         time_fwd = MCL_SUB(total, self->ol_timer);
         if (time_fwd < t_lock && self->ol_started_once == 0u)
         {
             ol_rpm = (mcl_scalar)0;
-            self->ol_stage = 1;   /* 首次启动锁定：固定相位，id 对齐 */
+            self->ol_stage = 1;   /* 首次启动锁定：固定相位，id 对齐（当前 t_lock=0 已不用） */
         }
         else
         {
-            self->ol_stage = 2;   /* 拖动：相位积分，iq 拖动 */
+            self->ol_stage = 2;   /* 拖动：升余弦 S 形斜坡，从 15rpm 地板起步 */
             ol_rpm = ol_rpm_max;
             if (time_fwd < MCL_ADD(t_lock, t_ramp))
             {
-                ol_rpm = MCL_MUL(ol_rpm_max,
-                                 MCL_DIV(MCL_SUB(time_fwd, t_lock), t_ramp));
+                /* S 形：ol_rpm = max/2·(1 − cos(π·(t−t_lock)/t_ramp))。
+                   起点/终点加速度 = 0：线性斜坡终点 α 突变（279rad/s²→0）会激发
+                   转子的 I/F 摆动（ω_n≈4Hz 欠阻尼，实测撒手后转子以 ±250rpm 摆过
+                   800→1046→…），摆动与速度环/观测器相互作用 → 闭环 ~1s 失锁。
+                   S 形终点 α=0，转子在斜坡尾部已稳定跟随，切闭环无摆动。 */
+#if defined(MCL_USE_Q15) || defined(MCL_USE_Q31)
+                mcl_math_sincos(MCL_MUL(MCL_DIV(MCL_SUB(time_fwd, t_lock), t_ramp),
+                                        MCL_FROM_FLOAT(0.5f)), &s_ramp, &c_ramp);
+#else
+                mcl_math_sincos(MCL_MUL(MCL_DIV(MCL_SUB(time_fwd, t_lock), t_ramp),
+                                        MCL_FROM_FLOAT(3.14159265f)), &s_ramp, &c_ramp);
+#endif
+                ol_rpm = MCL_MUL(MCL_MUL(ol_rpm_max, MCL_FROM_FLOAT(0.5f)),
+                                 MCL_SUB(MCL_FROM_FLOAT(1.0f), c_ramp));
             }
-            if (ol_rpm < MCL_MUL(ol_rpm_max, MCL_FROM_FLOAT(0.1f)))
+            if (ol_rpm < MCL_FROM_FLOAT(15.0f))
             {
-                ol_rpm = MCL_MUL(ol_rpm_max, MCL_FROM_FLOAT(0.1f)); /* 斜坡起点不低于 10%，避免从 0 拖起 */
+                ol_rpm = MCL_FROM_FLOAT(15.0f); /* 牵入地板 15rpm（=1.25Hz 场频，转子可靠牵入） */
             }
         }
 
@@ -174,48 +211,88 @@ static void mcl_openloop_auto(mcl *self, mcl_scalar *phase, mcl_scalar *speed)
         *phase = self->ol_phase;
         *speed = self->ol_speed;
 
-        /* seed 观测器到转子实际相位（开环相位 + openloop_seed_angle 负载角补偿），
-           帮助退出开环后立即跟踪。空载 I/F 稳态转子超前磁场约 90°，默认按 90° 补偿，
-           不同电机/负载可标定此角。 */
-        mcl_math_sincos(mcl_wrap_full_turn(MCL_ADD(self->ol_phase,
-                        MCL_MUL(sign, self->cfg.openloop_seed_angle))), &s, &c);
-        mcl_observer_seed(&self->observer,
-                          MCL_MUL(c, self->cfg.bemf_const),
-                          MCL_MUL(s, self->cfg.bemf_const));
+        /* 拖动期间每拍把开环角速度写入 SMO（供其 Kslf 用已知 ω 替代未收敛的 w_est，
+           让反电动势 e 在撒手前收敛到 ωλ；闭环后不再写，SMO 恢复自适应）。 */
+        mcl_observer_seed_omega_set(&self->observer, self->ol_speed);
 
         self->ol_timer = MCL_SUB(self->ol_timer, dt);
-        if (self->ol_timer < (mcl_scalar)0)
+        if (self->ol_timer <= (mcl_scalar)0)
         {
             self->ol_timer = (mcl_scalar)0;
             self->ol_started_once = 1u;   /* 首次开环序列已完成，之后重开环跳过锁定段 */
-            /* 序列结束瞬间 seed PLL：拖动期间 PLL 输入是 seed 前的观测器输出，
-               每拍都带一拍积分增量，PLL 相位会被带到远离真实磁链（实测落后约
-               190°、速度仅 6~23 rad/s），切闭环必崩。这里直接把 PLL 对准下一拍
-               的 PLL 输入：观测器输出 = 转子磁链角 = ol_phase（seed_angle=0），
-               预推一拍 = ol_phase+ω·dt，速度设为拖动速度。 */
-            self->pll.phase = mcl_wrap_full_turn(MCL_ADD(self->ol_phase,
-                mcl_speed_to_phase_incr(self->ol_speed, dt)));
-            self->pll.speed = self->ol_speed;
-            self->pll.last_phase = self->pll.phase;
 
-            /* 切换瞬时电流连续：把速度环 PID 积分项预置到拖动电流的一半（×方向）。
-               历史教训：切闭环瞬间 PLL 速度被 seed 到 = ol_speed（≈目标转速），
-               速度环误差 ≈0 → iq_ref 瞬间从拖动 2A 掉到 ~0 → 电流环反向强迫
-               iq 放电 → 产生强反磁链电压瞬态 v−R·i → Ortega 纯积分观测器把
-               |λ| 在 ~4ms 内从 0.007 压到 0.0038（实测 cap2 tick64）→ 角度噪声
-               → PLL 250µs 内 157→1 rad/s 失锁。预置积分项让 iq_ref 平滑过渡，
-               但空载稳态电流远小于拖动 2A，全量预置会造成超调（实测冲到 250rad/s）。
-               改用拖动电流一半（≈1A，低于 out_max 1.5A），减小切闭环超调。 */
-            self->pid_speed.i_term = (dir >= (mcl_scalar)0)
-                ? MCL_MUL(self->cfg.openloop_drag_q, MCL_FROM_FLOAT(0.15f))  /* 0.3A，接近空载稳态电流，避免预置过大顶高转速 */
-                : MCL_NEG(MCL_MUL(self->cfg.openloop_drag_q, MCL_FROM_FLOAT(0.15f)));
-            self->pid_speed.prev_out = self->pid_speed.i_term;
-
-            /* 切闭环后观测器锚定：继续 seed 观测器到当前帧角（=转子磁链角）一小段
-               时间，等电流重定向瞬态衰减，避免纯积分观测器在瞬态里被反磁链电压
-               压塌。锚定期间 PLL 已对准，观测器输出恒等于 seed 的帧角，角度不会
-               跳变。锚定时长 10ms ≫ 电流环重定向 ~2-3ms。 */
-            self->ol_anchor_timer = MCL_FROM_FLOAT(0.01f);
+            /* Float board path: don't hand over solely because time elapsed.
+             * Check independent SMO rotation and EMF amplitude, not the
+             * overridden open-loop speed. Hold at the end of the ramp while
+             * qualifying, and latch STALL if the observer never converges. */
+#if !defined(MCL_USE_Q15) && !defined(MCL_USE_Q31)
+            if (self->observer.ops == &mcl_observer_smo_ops)
+            {
+                mcl_observer_smo *obs = (mcl_observer_smo *)self->observer.impl;
+                mcl_scalar obs_speed = obs->w_est / dt;
+                mcl_scalar emf2 = obs->e_alpha_final * obs->e_alpha_final +
+                                  obs->e_beta_final * obs->e_beta_final;
+                mcl_scalar expected = MCL_ABS(self->ol_speed) * obs->params.flux * 0.31622777f;
+                mcl_scalar error = obs->phase - self->ol_phase;
+                while (error > MCL_PI) { error -= MCL_TWO_PI; }
+                while (error < -MCL_PI) { error += MCL_TWO_PI; }
+                if (MCL_ABS(obs_speed - self->ol_speed) < MCL_ABS(self->ol_speed) * 0.2f &&
+                    emf2 > expected * expected * 0.25f &&
+                    emf2 < expected * expected * 2.25f && MCL_ABS(error) < 1.74532925f)
+                {
+                    self->ol_lock_timer += dt;
+                }
+                else
+                {
+                    self->ol_lock_timer = 0.0f;
+                }
+                self->ol_wait_timer += dt;
+                if (self->ol_lock_timer < MCL_SMO_LOCK_TIME)
+                {
+                    if (self->ol_wait_timer >= MCL_SMO_WAIT_TIME)
+                    {
+                        mcl_fault_assert(self, MCL_FAULT_STALL);
+                    }
+                    self->ol_timer = dt; /* stay at final drag speed, don't restart ramp */
+                    self->ol_hyst_timer = 0.0f;
+                    return;
+                }
+                self->pll.speed = obs_speed;
+                self->pll.speed_est_fast = obs_speed;
+            }
+            else
+#endif
+            {
+                self->pll.speed = self->ol_speed;
+                self->pll.speed_est_fast = self->ol_speed;
+            }
+            self->pll.phase = self->pll.last_phase;
+            self->switch_phase_offset = MCL_SUB(self->ol_phase, self->pll.phase);
+#if defined(MCL_USE_Q15) || defined(MCL_USE_Q31)
+            if (self->switch_phase_offset > MCL_FROM_FLOAT(0.5f))
+                self->switch_phase_offset = MCL_SUB(self->switch_phase_offset, MCL_FROM_FLOAT(1.0f));
+            if (self->switch_phase_offset < MCL_FROM_FLOAT(-0.5f))
+                self->switch_phase_offset = MCL_ADD(self->switch_phase_offset, MCL_FROM_FLOAT(1.0f));
+#else
+            while (self->switch_phase_offset > MCL_PI) { self->switch_phase_offset -= MCL_TWO_PI; }
+            while (self->switch_phase_offset < -MCL_PI) { self->switch_phase_offset += MCL_TWO_PI; }
+#endif
+            /* Keep the control frame continuous: PLL uses observer angle,
+             * the frame offset decays together with the current reference.
+             * No instantaneous rotation of the d/q PI state is then needed. */
+            self->switch_blend_timer = MCL_FROM_FLOAT(MCL_SWITCH_BLEND_TIME);
+            self->switch_blend_iq0 = (mcl_scalar)0;
+            if (self->ctrl_mode != MCL_CTRL_CURRENT)
+            {
+                /* 斜坡从当前开环转速起，积分清零。预置成拖动电流（约 3A）会在
+                   空载上把转子一下推过最终目标。 */
+                self->speed_ramp_rpm = MCL_DIV(self->ol_speed, rpm_to_espeed);
+                self->pid_speed.i_term = (mcl_scalar)0;
+                self->pid_speed.prev_out = (mcl_scalar)0;
+                self->pid_speed.prev_error = (mcl_scalar)0;
+                self->iq_ref = (mcl_scalar)0;
+            }
+            mcl_observer_seed_omega_set(&self->observer, (mcl_scalar)0);
         }
         self->ol_hyst_timer = (mcl_scalar)0;
     }
@@ -223,37 +300,44 @@ static void mcl_openloop_auto(mcl *self, mcl_scalar *phase, mcl_scalar *speed)
     {
         /* 非开环：相位跟随观测器估计，保证下次进入连续 */
         self->ol_stage = 0;
-        self->ol_phase = *phase;
-
-        /* 锚定窗口：切闭环后短暂继续把观测器 seed 到当前帧角（转子磁链角），
-           防止电流重定向瞬态造成反磁链电压把纯积分观测器磁链压塌。
-           同时把 PLL 相位/速度钉在 ol_speed，避免锚定期间观测器相位被 pin 到
-           缓慢 frame → PLL wind-up 限幅器把 speed 夹到 ~0（实测 157→1rad/s）。 */
-        if (self->ol_anchor_timer > (mcl_scalar)0)
+        if (self->switch_blend_timer > (mcl_scalar)0)
         {
-            mcl_scalar s2;
-            mcl_scalar c2;
-            /* ol_phase 继续以 ol_speed 积分前进，作为旋转锚定参考 */
-            self->ol_phase = mcl_wrap_full_turn(MCL_ADD(self->ol_phase,
-                mcl_speed_to_phase_incr(self->ol_speed, dt)));
-            mcl_math_sincos(self->ol_phase, &s2, &c2);
-            mcl_observer_seed(&self->observer,
-                              MCL_MUL(c2, self->cfg.bemf_const),
-                              MCL_MUL(s2, self->cfg.bemf_const));
-            self->pll.phase = self->ol_phase;
-            self->pll.speed = self->ol_speed;
-            self->pll.last_phase = self->pll.phase;
-            *phase = self->pll.phase;
-            *speed = self->pll.speed;
-            self->ol_anchor_timer = MCL_SUB(self->ol_anchor_timer, dt);
-            if (self->ol_anchor_timer < (mcl_scalar)0)
-            {
-                self->ol_anchor_timer = (mcl_scalar)0;
-            }
+            mcl_scalar blend = MCL_DIV(self->switch_blend_timer, MCL_FROM_FLOAT(MCL_SWITCH_BLEND_TIME));
+            *phase = mcl_wrap_full_turn(MCL_ADD(*phase, MCL_MUL(self->switch_phase_offset, blend)));
         }
+        self->ol_phase = *phase;
     }
 }
 #endif /* MCL_DISABLE_OBSERVER */
+
+/* 速度环跟踪斜坡后的指令。rate<=0 时直接等于最终目标。 */
+static mcl_scalar mcl_speed_ref_ramped(mcl *self, mcl_scalar dt)
+{
+    mcl_scalar target = self->speed_ref_rpm;
+    mcl_scalar rate = self->cfg.speed_ramp_rpm_s;
+    mcl_scalar cmd = self->speed_ramp_rpm;
+    mcl_scalar step;
+    mcl_scalar err;
+
+    if (rate <= (mcl_scalar)0)
+    {
+        self->speed_ramp_rpm = target;
+        return target;
+    }
+    step = MCL_MUL(rate, dt);
+    err = MCL_SUB(target, cmd);
+    if (err > step)
+    {
+        err = step;
+    }
+    if (err < MCL_NEG(step))
+    {
+        err = MCL_NEG(step);
+    }
+    cmd = MCL_ADD(cmd, err);
+    self->speed_ramp_rpm = cmd;
+    return cmd;
+}
 
 static void mcl_control_tick_foc(mcl *self)
 {
@@ -357,10 +441,7 @@ static void mcl_control_tick_foc(mcl *self)
                             MCL_MUL(self->v_beta_prev, MCL_MUL(vbus, MCL_FROM_FLOAT(0.5f))),
                             i_alpha, i_beta, self->dt, &phase, NULL);
 
-        /* 观测器输出即「转子磁链角」（FOC d 轴 = 磁链、q 轴 = 转矩轴），直接作
-           帧角。当前观测器 = Ortega 磁链观测器（VESC 式）：θ=atan2(λ_β,λ_α)、
-           幅值反馈 λ²−|λ|² 让 λ 自动收敛到真实磁链，无固定相移、对参数误差
-           鲁棒（避免了 SMO 预设相移 δ 导致的口径型 90°/180° 翻面）。 */
+        /* SMO supplies compensated rotor angle; PLL tracks angle and speed. */
         mcl_pll_run(&self->pll, phase, self->dt, &phase, &speed);
 
         /* 自动开环→闭环切换：闭环控制模式下，低速段开环拖动 */
@@ -369,6 +450,7 @@ static void mcl_control_tick_foc(mcl *self)
             self->ctrl_mode == MCL_CTRL_POSITION)
         {
             mcl_openloop_auto(self, &phase, &speed);
+            if (self->state != MCL_STATE_RUN) { return; }
         }
 #endif
     }
@@ -416,16 +498,18 @@ static void mcl_control_tick_foc(mcl *self)
     /* 速度环：反馈转速 rpm = 电气角速度 rad/s ÷ 极对数 × 60/(2π) */
     if (self->ctrl_mode == MCL_CTRL_SPEED || self->ctrl_mode == MCL_CTRL_POSITION)
     {
-        if (self->cfg.speed_loop_divider > 0u &&
+        if (self->ol_stage == 0u && self->cfg.speed_loop_divider > 0u &&
             (self->tick_count % (uint32_t)self->cfg.speed_loop_divider) == 0u)
         {
+            mcl_scalar speed_dt = MCL_MUL(self->dt, (mcl_scalar)self->cfg.speed_loop_divider);
+            mcl_scalar ref_rpm = mcl_speed_ref_ramped(self, speed_dt);
 #if defined(MCL_USE_Q15) || defined(MCL_USE_Q31)
             /* 定点：speed 与 speed_ref_rpm 均已归一化（HAL/调用方在边界分别 ÷电气速度基值
                / ÷rpm 基值；两者数值相等，故直接比较，无 rpm↔rad/s 换算。
                详见 docs/spec/mcl_fixed_point.md） */
             iq_ref = mcl_pid_run(&self->pid_speed,
-                                 MCL_SUB(self->speed_ref_rpm, speed),
-                                 MCL_MUL(self->dt, (mcl_scalar)self->cfg.speed_loop_divider));
+                                 MCL_SUB(ref_rpm, speed),
+                                 speed_dt);
 #else
             /* 速度环反馈直接取 PLL 瞬时估速，不再低通滤波。
                历史教训：曾加 20Hz 反馈滤波，但滤波滞后让速度环永远"追不上"
@@ -434,11 +518,30 @@ static void mcl_control_tick_foc(mcl *self)
             mcl_scalar fb_rpm = MCL_MUL(speed, MCL_FROM_FLOAT(MCL_RPM_PER_RAD_S /
                                         (float)self->cfg.pole_pairs));
             iq_ref = mcl_pid_run(&self->pid_speed,
-                                 MCL_SUB(self->speed_ref_rpm, fb_rpm),
-                                 MCL_MUL(self->dt, (mcl_scalar)self->cfg.speed_loop_divider));
+                                 MCL_SUB(ref_rpm, fb_rpm),
+                                 speed_dt);
 #endif
         }
         self->iq_ref = iq_ref;
+
+        /* 角度掺混仍用这个计时。电流不再从拖动电流掺进来，否则斜坡期间 iq 一直是 3A。 */
+        if (self->switch_blend_timer > (mcl_scalar)0)
+        {
+            self->switch_blend_timer = MCL_SUB(self->switch_blend_timer, self->dt);
+            if (self->switch_blend_timer < (mcl_scalar)0)
+            {
+                self->switch_blend_timer = (mcl_scalar)0;
+            }
+        }
+    }
+
+    if (self->ctrl_mode == MCL_CTRL_CURRENT && self->switch_blend_timer > (mcl_scalar)0)
+    {
+        mcl_scalar blend = MCL_DIV(self->switch_blend_timer, MCL_FROM_FLOAT(MCL_SWITCH_BLEND_TIME));
+        iq_ref = MCL_ADD(MCL_MUL(self->switch_blend_iq0, blend),
+                        MCL_MUL(iq_ref, MCL_SUB(MCL_FROM_FLOAT(1.0f), blend)));
+        self->switch_blend_timer = MCL_SUB(self->switch_blend_timer, self->dt);
+        if (self->switch_blend_timer < (mcl_scalar)0) { self->switch_blend_timer = (mcl_scalar)0; }
     }
 
     /* 温度降额：限制 iq 幅值（derate 满幅 = 不降额） */
@@ -502,9 +605,12 @@ static void mcl_control_tick_foc(mcl *self)
     mcl_transform_inv_park(vd, vq, phase, &v_alpha, &v_beta);
     mcl_svpwm_run(v_alpha, v_beta, self->cfg.max_duty, &da, &db, &dc);
 
-    /* 缓存电压供下一周期观测器使用 */
-    self->v_alpha_prev = v_alpha;
-    self->v_beta_prev = v_beta;
+    /* 从最终占空比重建实际平均相电压，含 max_duty 缩放和调制钳位。
+       缓存单位为 vbus/2；下拍再乘母线电压转为 V。 */
+    self->v_alpha_prev = MCL_FROM_FLOAT((2.0f / 3.0f) *
+        (2.0f * MCL_TO_FLOAT(da) - MCL_TO_FLOAT(db) - MCL_TO_FLOAT(dc)));
+    self->v_beta_prev = MCL_FROM_FLOAT((2.0f / 1.73205080757f) *
+        (MCL_TO_FLOAT(db) - MCL_TO_FLOAT(dc)));
 
     /* 6. 保护 */
     fault = mcl_protection_check(&self->protection, ia, ib, ic, vbus,
@@ -644,6 +750,7 @@ int mcl_init(mcl *self, const mcl_config *cfg,
 
     self->iq_ref = (mcl_scalar)0;
     self->speed_ref_rpm = (mcl_scalar)0;
+    self->speed_ramp_rpm = (mcl_scalar)0;
     self->pos_ref_rad = (mcl_scalar)0;
     self->phase_rad = (mcl_scalar)0;
     self->speed_rad_s = (mcl_scalar)0;
@@ -665,6 +772,11 @@ int mcl_init(mcl *self, const mcl_config *cfg,
     self->ol_phase = (mcl_scalar)0;
     self->ol_stage = 0u;
     self->ol_started_once = 0u;
+    self->switch_blend_timer = (mcl_scalar)0;
+    self->switch_blend_iq0 = (mcl_scalar)0;
+    self->switch_phase_offset = (mcl_scalar)0;
+    self->ol_lock_timer = (mcl_scalar)0;
+    self->ol_wait_timer = (mcl_scalar)0;
     self->tick_count = 0u;
     self->fault_timer = (mcl_scalar)0;
     self->fault_info.fault = MCL_FAULT_NONE;
@@ -709,6 +821,7 @@ int mcl_set_config(mcl *self, const mcl_config *cfg)
     self->cfg.limits = cfg->limits;
     self->cfg.fault_stop_time = cfg->fault_stop_time;
     self->cfg.max_duty = cfg->max_duty;
+    self->cfg.speed_ramp_rpm_s = cfg->speed_ramp_rpm_s;
     self->cfg.openloop_rpm = cfg->openloop_rpm;
     self->cfg.openloop_drag_q = cfg->openloop_drag_q;
     self->cfg.openloop_seed_angle = cfg->openloop_seed_angle;
@@ -766,6 +879,25 @@ int mcl_start(mcl *self)
 
     self->state = MCL_STATE_RUN;
     self->tick_count = 0u;
+    self->ol_timer = (mcl_scalar)0;
+    self->ol_hyst_timer = (mcl_scalar)0;
+    self->ol_lock_timer = (mcl_scalar)0;
+    self->ol_wait_timer = (mcl_scalar)0;
+    self->ol_stage = 0u;
+    self->ol_started_once = 0u;
+    self->switch_blend_timer = (mcl_scalar)0;
+    self->switch_blend_iq0 = (mcl_scalar)0;
+    self->switch_phase_offset = (mcl_scalar)0;
+    self->speed_ramp_rpm = (mcl_scalar)0;
+    self->v_alpha_prev = (mcl_scalar)0;
+    self->v_beta_prev = (mcl_scalar)0;
+    mcl_pid_reset(&self->foc.pid_d);
+    mcl_pid_reset(&self->foc.pid_q);
+    mcl_pid_reset(&self->pid_speed);
+#ifndef MCL_DISABLE_OBSERVER
+    mcl_observer_reset(&self->observer);
+    mcl_pll_reset(&self->pll);
+#endif
 
     /* 无感闭环启动：预充电开环迟滞，使首拍即进入开环（预定位 + 拖动），
        避免低速段观测器未收敛时闭环乱甩转子（VESC 式自动开环启动） */

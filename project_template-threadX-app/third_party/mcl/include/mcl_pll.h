@@ -27,6 +27,8 @@ typedef struct
     mcl_scalar speed;                /**< 估计速度：float=rad/s，定点=电气速度 pu(=ω/W_BASE)。
                                           VESC 式下本字段即积分项，直接累加 ki·err·dt */
     mcl_scalar last_phase;           /**< 上一拍输入相位（相位差分数度估计 + wind-up 限幅用） */
+    mcl_scalar speed_est_fast;       /**< VESC 式：输入相位差分转速的低通估计（τ≈3ms），
+                                          wind-up 限幅基准 = 3× 此值（float 专用） */
 } mcl_pll;
 
 /**

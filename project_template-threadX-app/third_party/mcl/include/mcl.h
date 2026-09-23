@@ -75,7 +75,8 @@ typedef struct
     /* ---- 运行时变量（private） ---- */
     mcl_ctrl_mode ctrl_mode;    /**< 控制模式（电流/速度/位置/开环） */
     mcl_scalar iq_ref;          /**< 当前 Iq 目标 A */
-    mcl_scalar speed_ref_rpm;   /**< 速度目标 rpm */
+    mcl_scalar speed_ref_rpm;   /**< 速度目标 rpm（最终值，应用层写入） */
+    mcl_scalar speed_ramp_rpm;  /**< 速度环实际跟踪的指令 rpm（向 speed_ref 斜坡） */
     mcl_scalar pos_ref_rad;     /**< 位置目标 rad */
     mcl_scalar phase_rad;       /**< 当前电气角 rad */
     mcl_scalar speed_rad_s;     /**< 当前速度 rad/s */
@@ -84,8 +85,8 @@ typedef struct
     mcl_scalar id_now;          /**< 当前 Id A */
     mcl_scalar iq_now;          /**< 当前 Iq A */
     mcl_scalar duty_now;        /**< 当前占空比 */
-    mcl_scalar v_alpha_prev;    /**< 上一周期 α 电压（观测器输入） */
-    mcl_scalar v_beta_prev;     /**< 上一周期 β 电压（观测器输入） */
+    mcl_scalar v_alpha_prev;    /**< 上一周期实际 alpha 电压 / (vbus/2)，由最终 duty 重建 */
+    mcl_scalar v_beta_prev;     /**< 上一周期实际 beta 电压 / (vbus/2)，由最终 duty 重建 */
     mcl_scalar dt;              /**< 电流环周期 s（init 预计算） */
     mcl_scalar openloop_speed;  /**< 开环电气角速度 rad/s */
     mcl_scalar openloop_angle;  /**< 开环累计相位 rad */
@@ -96,8 +97,14 @@ typedef struct
     mcl_scalar ol_anchor_timer; /**< 切闭环后观测器锚定倒计时 s（>0：继续 seed 观测器到当前帧角，等电流重定向瞬态衰减） */
     mcl_scalar ol_speed;        /**< 自动开环当前电气角速度 rad/s */
     mcl_scalar ol_phase;        /**< 自动开环积分相位 rad */
+    mcl_scalar switch_blend_timer; /**< 切闭环后电流参考平滑过渡倒计时 s（>0：iq_ref 从拖动电流渐变到速度环输出，
+                                        消除切闭环转矩阶跃对转子摆动的激励） */
+    mcl_scalar switch_blend_iq0;   /**< 平滑过渡起点电流（=拖动电流，带方向） A */
+    mcl_scalar switch_phase_offset; /**< 开环角相对 PLL 角的最短偏差，切换期逐渐归零 */
+    mcl_scalar ol_lock_timer;      /**< SMO 速度/幅值持续合格的时间 */
+    mcl_scalar ol_wait_timer;      /**< 斜坡结束后等待 SMO 收敛的时间 */
     uint8_t   ol_stage;         /**< 自动开环阶段：0=未开环 1=锁定(对齐) 2=拖动 */
-    uint8_t   ol_started_once;  /**< 是否已启动过一次（1=重开环跳过锁定段，直接匀速 IF 拖行不停转） */
+    uint8_t   ol_started_once;  /**< 是否已完成启动斜坡（重拖跳过锁定段） */
     uint32_t tick_count;        /**< 控制周期计数（分频用） */
     mcl_fault_info fault_info;  /**< 故障现场快照 */
     mcl_scalar fault_timer;     /**< 故障恢复计时 s */

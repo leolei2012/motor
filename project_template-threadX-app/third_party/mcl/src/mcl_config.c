@@ -99,6 +99,7 @@ void mcl_config_default(mcl_config *cfg)
     cfg->pos_pid.i_min = MCL_FROM_FLOAT(-500.0f);
     cfg->pos_pid.i_max = MCL_FROM_FLOAT(500.0f);
 #endif
+    cfg->speed_ramp_rpm_s = (mcl_scalar)0; /* 默认不斜坡，避免改变既有阶跃测试 */
 
     /* 反馈 */
     cfg->feedback.type = MCL_FEEDBACK_NONE;

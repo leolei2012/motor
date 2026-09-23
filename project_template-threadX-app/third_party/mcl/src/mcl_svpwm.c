@@ -63,4 +63,13 @@ void mcl_svpwm_run(mcl_scalar v_alpha, mcl_scalar v_beta, mcl_scalar max_duty,
     *da = MCL_MUL(MCL_ADD(MCL_MUL(MCL_ADD(va, v0), MCL_HALF), MCL_HALF), max_duty);
     *db = MCL_MUL(MCL_ADD(MCL_MUL(MCL_ADD(vb, v0), MCL_HALF), MCL_HALF), max_duty);
     *dc = MCL_MUL(MCL_ADD(MCL_MUL(MCL_ADD(vc, v0), MCL_HALF), MCL_HALF), max_duty);
+
+    /* PI plus decoupling can exceed the linear modulation range. Clamp
+     * before the HAL integer conversion and observer reconstruction. */
+    if (*da < (mcl_scalar)0) { *da = (mcl_scalar)0; }
+    if (*db < (mcl_scalar)0) { *db = (mcl_scalar)0; }
+    if (*dc < (mcl_scalar)0) { *dc = (mcl_scalar)0; }
+    if (*da > max_duty) { *da = max_duty; }
+    if (*db > max_duty) { *db = max_duty; }
+    if (*dc > max_duty) { *dc = max_duty; }
 }
