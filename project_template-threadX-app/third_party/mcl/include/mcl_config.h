@@ -38,7 +38,7 @@
  * 4. 【时间与 time_base】dt 归一化 dt_pu = dt/T_BASE = dt·W_BASE：
  *    - float：time_base 保持默认 1.0（不归一化，dt 为物理秒）。
  *    - 定点：time_base = 1/W_BASE，且「以秒为单位、与 dt 比较/累加」的阈值
- *      （限值里的 stall_time、fault_stop_time、openloop_*_time）都要随
+ *      （限值里的 fault_stop_time、openloop_*_time）都要随
  *      time_base 一起归一化，否则会提前 1/T_BASE 倍触发（见 fixed_point.md §9.1）。
  *
  * 5. 【PID 增益必须 <1（定点）】Q15/Q31 范围 [-1,1)，kp/ki 通常 <1；
@@ -144,8 +144,7 @@ typedef struct
     /* ==================== 保护 ==================== */
 
     mcl_protection_limits limits; /**< 保护阈值与使能位（见 mcl_types.h MCL_PROTECT_*）。
-                                      电流/电压/温度阈值按 float 物理量或 per-unit 归一化；
-                                      stall_time 是时间阈值，定点需归一化（注意事项 4）。 */
+                                      电流/电压/温度阈值按 float 物理量或 per-unit 归一化。 */
     mcl_scalar fault_stop_time;   /**< 故障后自动恢复时间，s（0 = 手动清除，不自动恢复）。
                                       时间阈值，定点需归一化（注意事项 4）。 */
 

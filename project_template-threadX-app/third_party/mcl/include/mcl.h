@@ -83,6 +83,7 @@ typedef struct
     mcl_scalar fb_speed_filt;   /**< 速度环反馈低通滤波值 rad/s（只滤反馈，不碰前馈/前向） */
     mcl_scalar vbus;            /**< 母线电压缓存 V */
     mcl_scalar id_now;          /**< 当前 Id A */
+    mcl_scalar id_cmd;          /**< MTPA 的 id 指令斜坡 A。开环期间为 0 */
     mcl_scalar iq_now;          /**< 当前 Iq A */
     mcl_scalar duty_now;        /**< 当前占空比 */
     mcl_scalar v_alpha_prev;    /**< 上一周期实际 alpha 电压 / (vbus/2)，由最终 duty 重建 */

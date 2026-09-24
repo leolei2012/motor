@@ -9,6 +9,7 @@
 #include "mcl.h"
 #include "mcl_observer_ortega.h"
 #include "mcl_observer_smo.h"
+#include <string.h>
 
 /* 60/(2π)：rad/s → rpm 换算系数（TODO 定点：需缩放） */
 #define MCL_RPM_PER_RAD_S  9.5492966f
@@ -221,10 +222,8 @@ static void mcl_openloop_auto(mcl *self, mcl_scalar *phase, mcl_scalar *speed)
             self->ol_timer = (mcl_scalar)0;
             self->ol_started_once = 1u;   /* 首次开环序列已完成，之后重开环跳过锁定段 */
 
-            /* Float board path: don't hand over solely because time elapsed.
-             * Check independent SMO rotation and EMF amplitude, not the
-             * overridden open-loop speed. Hold at the end of the ramp while
-             * qualifying, and latch STALL if the observer never converges. */
+            /* 时间到了不盲切。SMO 的转速、反电动势和角度要连续合格才交出去。
+               不合格就停在终点转速继续拖，不报堵转、不关 PWM。 */
 #if !defined(MCL_USE_Q15) && !defined(MCL_USE_Q31)
             if (self->observer.ops == &mcl_observer_smo_ops)
             {
@@ -246,14 +245,9 @@ static void mcl_openloop_auto(mcl *self, mcl_scalar *phase, mcl_scalar *speed)
                 {
                     self->ol_lock_timer = 0.0f;
                 }
-                self->ol_wait_timer += dt;
                 if (self->ol_lock_timer < MCL_SMO_LOCK_TIME)
                 {
-                    if (self->ol_wait_timer >= MCL_SMO_WAIT_TIME)
-                    {
-                        mcl_fault_assert(self, MCL_FAULT_STALL);
-                    }
-                    self->ol_timer = dt; /* stay at final drag speed, don't restart ramp */
+                    self->ol_timer = dt; /* 停在终点转速继续拖，不报故障 */
                     self->ol_hyst_timer = 0.0f;
                     return;
                 }
@@ -399,14 +393,22 @@ static void mcl_control_tick_foc(mcl *self)
 
     /* 读温度（电机/FET 取更高者） */
     temp_max = (mcl_scalar)0;
-    if (self->hal->read_temp != NULL)
     {
         mcl_scalar t_motor = (mcl_scalar)0;
         mcl_scalar t_fet = (mcl_scalar)0;
-        if (self->hal->read_temp(self->hal_ctx, &t_motor, &t_fet) == MCL_OK)
+        mcl_protection_status pst;
+        if (self->hal->read_temp != NULL &&
+            self->hal->read_temp(self->hal_ctx, &t_motor, &t_fet) == MCL_OK)
         {
             temp_max = (t_motor > t_fet) ? t_motor : t_fet;
         }
+        memset(&pst, 0, sizeof(pst));
+        pst.temp_fet = t_fet;
+        pst.temp_motor = t_motor;
+        pst.current_offset[0] = self->cfg.current_offset[0];
+        pst.current_offset[1] = self->cfg.current_offset[1];
+        pst.current_offset[2] = self->cfg.current_offset[2];
+        mcl_protection_set_status(&self->protection, &pst);
     }
     derate = mcl_protection_derate(&self->protection, temp_max);
 
@@ -591,12 +593,29 @@ static void mcl_control_tick_foc(mcl *self)
             mcl_scalar dir = (self->ctrl_mode == MCL_CTRL_SPEED || self->ctrl_mode == MCL_CTRL_POSITION)
                            ? self->speed_ref_rpm : self->iq_ref;
             id_ref = (mcl_scalar)0;
+            self->id_cmd = (mcl_scalar)0;
             iq_ref_loop = (dir >= (mcl_scalar)0) ? self->cfg.openloop_drag_q
                                                  : MCL_NEG(self->cfg.openloop_drag_q);
         }
         else
         {
-            mcl_mtpa_fw_id_ref(&self->mtpa_fw, iq_ref, speed, vbus, &id_ref);
+            mcl_scalar id_target;
+            mcl_scalar step;
+            mcl_scalar err;
+            mcl_mtpa_fw_id_ref(&self->mtpa_fw, iq_ref, speed, vbus, &id_target);
+            /* 凸极 MTPA 的 id 不要一拍跳变。额定电流走完约 0.3s；隐极目标是 0。 */
+            step = MCL_MUL(MCL_DIV(self->cfg.rated_current, MCL_FROM_FLOAT(0.3f)), self->dt);
+            err = MCL_SUB(id_target, self->id_cmd);
+            if (err > step)
+            {
+                err = step;
+            }
+            if (err < MCL_NEG(step))
+            {
+                err = MCL_NEG(step);
+            }
+            self->id_cmd = MCL_ADD(self->id_cmd, err);
+            id_ref = self->id_cmd;
         }
 
         mcl_transform_park(i_alpha, i_beta, phase, &id, &iq);
@@ -757,6 +776,7 @@ int mcl_init(mcl *self, const mcl_config *cfg,
     self->fb_speed_filt = (mcl_scalar)0;
     self->vbus = cfg->bus_voltage;
     self->id_now = (mcl_scalar)0;
+    self->id_cmd = (mcl_scalar)0;
     self->iq_now = (mcl_scalar)0;
     self->duty_now = (mcl_scalar)0;
     self->v_alpha_prev = (mcl_scalar)0;
@@ -831,7 +851,7 @@ int mcl_set_config(mcl *self, const mcl_config *cfg)
     mcl_pid_set_params(&self->foc.pid_q, &cfg->current_pid);
     mcl_pid_set_params(&self->pid_speed, &cfg->speed_pid);
     mcl_pid_set_params(&self->pid_pos, &cfg->pos_pid);
-    self->protection.limits = cfg->limits;   /* 只更新阈值，保留堵转计时状态 */
+    self->protection.limits = cfg->limits;
 
     return MCL_OK;
 }
@@ -889,6 +909,7 @@ int mcl_start(mcl *self)
     self->switch_blend_iq0 = (mcl_scalar)0;
     self->switch_phase_offset = (mcl_scalar)0;
     self->speed_ramp_rpm = (mcl_scalar)0;
+    self->id_cmd = (mcl_scalar)0;
     self->v_alpha_prev = (mcl_scalar)0;
     self->v_beta_prev = (mcl_scalar)0;
     mcl_pid_reset(&self->foc.pid_d);

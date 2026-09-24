@@ -194,8 +194,7 @@ static void cfg_relax(mcl_config *cfg)
     cfg->limits.overvoltage = 100.0f;
     cfg->limits.undervoltage = -100.0f;
     cfg->limits.overtemp = 1000.0f;
-    cfg->limits.stall_speed = 0.0f;
-    cfg->limits.stall_time = 100.0f;
+
 }
 
 static float rpm_of(hal_ctx_t *h)

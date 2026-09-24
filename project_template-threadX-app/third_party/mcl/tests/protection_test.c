@@ -3,11 +3,10 @@
  * @brief   mcl 保护功能单元测试
  *
  * 直接测试 mcl_protection 接口，覆盖全部保护路径：
- *   过流、过压、欠压、过温、堵转、温度降额，以及：
+ *   过流、过压、欠压、过温、温度降额，以及：
  *   - 使能位关闭分支（enabled 位掩码）
  *   - 边界值（恰好等于阈值 → 不触发）
- *   - 堵转计时与恢复复位
- *   - 故障检测优先级（过流 > 过压 > 欠压 > 过温 > 堵转）
+ *   - 故障检测优先级（过流 > 过压 > 欠压 > 过温）
  *
  * 不依赖 HAL / 电机模型，直接注入 ia/ib/ic/vbus/temp/speed/dt。
  *
@@ -54,8 +53,6 @@ int main(void)
     lim.undervoltage      = MCL_FROM_FLOAT(0.08f);
     lim.temp_derate_start = MCL_FROM_FLOAT(0.80f);
     lim.overtemp          = MCL_FROM_FLOAT(0.95f);
-    lim.stall_speed       = MCL_FROM_FLOAT(0.05f);
-    lim.stall_time        = MCL_FROM_FLOAT(0.25f);
 
     printf("===== mcl 保护单元测试（%s）=====\n",
 #if defined(MCL_USE_Q15)
@@ -123,37 +120,6 @@ int main(void)
         MCL_FROM_FLOAT(0.50f), MCL_FROM_FLOAT(0.001f));
     CHECK("过温触发", f == MCL_FAULT_OVERTEMP);
 
-    /* ---------- 堵转：低速持续超时 ---------- */
-    mcl_protection_init(&prot, &lim);
-    f = MCL_FAULT_NONE;
-    /* speed=0，dt=0.1，累计 3 步 = 0.3 > 0.25 触发 */
-    for (int i = 0; i < 3; i++)
-    {
-        f = mcl_protection_check(&prot,
-            MCL_FROM_FLOAT(0.02f), MCL_FROM_FLOAT(-0.01f), MCL_FROM_FLOAT(-0.01f),
-            MCL_FROM_FLOAT(0.24f), MCL_FROM_FLOAT(0.40f),
-            MCL_FROM_FLOAT(0.0f), MCL_FROM_FLOAT(0.1f));
-    }
-    CHECK("堵转触发（0.3 超 0.25 阈值）", f == MCL_FAULT_STALL);
-    CHECK("堵转标志 stalled 置位", prot.stalled == true);
-
-    /* 堵转恢复：速度恢复 → 计时清零 */
-    mcl_protection_init(&prot, &lim);
-    f = MCL_FAULT_NONE;
-    for (int i = 0; i < 2; i++)   /* 0.2 < 0.25 未触发 */
-    {
-        f = mcl_protection_check(&prot,
-            MCL_FROM_FLOAT(0.02f), MCL_FROM_FLOAT(-0.01f), MCL_FROM_FLOAT(-0.01f),
-            MCL_FROM_FLOAT(0.24f), MCL_FROM_FLOAT(0.40f),
-            MCL_FROM_FLOAT(0.0f), MCL_FROM_FLOAT(0.1f));
-    }
-    f = mcl_protection_check(&prot,
-        MCL_FROM_FLOAT(0.02f), MCL_FROM_FLOAT(-0.01f), MCL_FROM_FLOAT(-0.01f),
-        MCL_FROM_FLOAT(0.24f), MCL_FROM_FLOAT(0.40f),
-        MCL_FROM_FLOAT(0.50f), MCL_FROM_FLOAT(0.1f));   /* 速度恢复 */
-    CHECK("堵转未触发（速度恢复复位计时）", f == MCL_FAULT_NONE);
-    CHECK("堵转标志 stalled 复位", prot.stalled == false);
-
     /* ---------- 温度降额 ---------- */
     mcl_protection_init(&prot, &lim);
     derate = mcl_protection_derate(&prot, MCL_FROM_FLOAT(0.50f));
@@ -187,8 +153,8 @@ int main(void)
     f = mcl_protection_check(&prot,
         MCL_FROM_FLOAT(0.90f), MCL_FROM_FLOAT(0.0f), MCL_FROM_FLOAT(0.0f),   /* 过流 */
         MCL_FROM_FLOAT(0.90f), MCL_FROM_FLOAT(0.97f),                         /* 过压+过温 */
-        MCL_FROM_FLOAT(0.0f), MCL_FROM_FLOAT(0.001f));                        /* 堵转 */
-    CHECK("优先级：过流优先于过压/过温/堵转", f == MCL_FAULT_OVERCURRENT);
+        MCL_FROM_FLOAT(0.0f), MCL_FROM_FLOAT(0.001f));
+    CHECK("优先级：过流优先于过压/过温", f == MCL_FAULT_OVERCURRENT);
 
     printf("\n=== %s ===（%d 项失败）\n", g_fail == 0 ? "全部通过" : "存在失败", g_fail);
     return g_fail == 0 ? 0 : 1;

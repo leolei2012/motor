@@ -115,7 +115,7 @@ int main(void)
     cfg.openloop_rpm = 0.0f;  /* 禁用自动开环，纯闭环测 SMO */
     cfg.limits.overcurrent = 100.0f;  cfg.limits.overvoltage = 100.0f;
     cfg.limits.undervoltage = -100.0f; cfg.limits.overtemp = 1000.0f;
-    cfg.limits.stall_speed = 0.0f;    cfg.limits.stall_time = 100.0f;
+
 
     mcl_init(&motor, &cfg, &hal, &hctx, &mcl_observer_smo_ops, &obs, &op);
     mcl_set_mode(&motor, MCL_MODE_FOC_SENSORLESS);

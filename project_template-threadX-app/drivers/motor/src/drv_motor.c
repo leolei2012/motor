@@ -268,17 +268,22 @@ int drv_motor_init(struct drv_motor *self)
                                                    的转子超前量随负载变化，固定角 0°/π/2 都无法覆盖。
                                                    字段保留供其他观测器使用。 */
 
-    /* 无温度传感器，不启用假温度保护。开环收敛失败仍由 mcl 独立超时报堵转。 */
+    /* 无温度传感器，不启用假温度保护。SMO 不合格只继续开环拖，不报堵转。 */
     cfg.limits.enabled = MCL_PROTECT_OVERCURRENT | MCL_PROTECT_OVERVOLTAGE |
-                         MCL_PROTECT_UNDERVOLTAGE;
+                         MCL_PROTECT_UNDERVOLTAGE | MCL_PROTECT_ABS_OVERCURRENT |
+                         MCL_PROTECT_UNBALANCED |
+                         MCL_PROTECT_OVERSPEED | MCL_PROTECT_ABS_OVERSPEED;
     cfg.fault_stop_time = 0.0f; /* 锁存故障，保留诊断现场，显式清故障后才能重启 */
     cfg.limits.overcurrent  = 4.0f;               /* 过流 4A（与 D/Qcur_MAX 对齐） */
     cfg.limits.overvoltage  = 48.0f;              /* VBUS_MAX=48V */
     cfg.limits.undervoltage = 8.0f;               /* VBUS_MIN=8V */
+    cfg.limits.abs_overcurrent = 8.0f;
+    cfg.limits.offset_max = 2.0f;
+    cfg.limits.unbalanced_max = 3.0f;
+    cfg.limits.overspeed = 800.0f;                /* 电气 rad/s，约 1500 rpm */
+    cfg.limits.abs_overspeed = 1100.0f;           /* 电气 rad/s，约 2100 rpm */
     cfg.limits.overtemp     = 80.0f;              /* Temp_MAX=80℃ */
     cfg.limits.temp_derate_start = 80.0f;         /* 简化：80℃ 开始降额 */
-    cfg.limits.stall_speed  = 1.0f;               /* 堵转转速 rad/s（保守默认） */
-    cfg.limits.stall_time   = 0.5f;               /* 堵转时间 0.5s */
 
     /* SMO: gain in V, boundary in A. Retain 10V/0.5A: the local correction
        slope is 20 ohm and dt*(R+gain/boundary)/L ~= 1.60 (<2).
@@ -286,7 +291,8 @@ int drv_motor_init(struct drv_motor *self)
        it must not be compared directly with the full physical back-EMF. */
     mcl_observer_smo_params op;
     op.resistance = cfg.phase_resistance;   /* 0.475Ω 相电阻 */
-    op.inductance = cfg.phase_inductance;   /* 0.80mH 相电感 */
+    op.inductance = cfg.phase_inductance;   /* Lq，0.80mH */
+    op.ld         = cfg.phase_inductance - cfg.ld_lq_diff; /* Ld；差为 0 时等于 Lq */
     op.flux       = cfg.bemf_const;         /* 7.17mWb 永磁磁链 */
     op.gain       = 10.0f;                  /* 滑模增益 Kslide=电压上限 V，需 > ωλ_max ≈7.5V */
     op.lpf        = 6.28f;                  /* 最低电气转速 1Hz（=2π rad/s，滤波系数下限） */
@@ -774,10 +780,11 @@ int drv_motor_measure_rl(struct drv_motor *self)
 
     self->observer.params.resistance = (mcl_scalar)r_meas;
     self->observer.params.inductance = (mcl_scalar)l_meas;
+    self->observer.params.ld = (mcl_scalar)l_meas - self->motor.cfg.ld_lq_diff;
     self->motor.cfg.phase_resistance = (mcl_scalar)r_meas;
     self->motor.cfg.phase_inductance = (mcl_scalar)l_meas;
     self->motor.foc.mtpa_fw.lq = (mcl_scalar)l_meas;
-    self->motor.foc.mtpa_fw.ld = (mcl_scalar)(l_meas - 0.075e-3f);  /* Lq−Ld=0.075mH 凸极差 */
+    self->motor.foc.mtpa_fw.ld = (mcl_scalar)l_meas - self->motor.cfg.ld_lq_diff;
 
     return 0;
 }

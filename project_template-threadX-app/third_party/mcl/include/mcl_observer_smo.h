@@ -19,11 +19,12 @@ extern "C" {
 typedef struct
 {
     mcl_scalar resistance;      /**< 相电阻 Ω（float）/ pu（定点） */
-    mcl_scalar inductance;      /**< 相电感 H（float）/ pu（定点） */
+    mcl_scalar inductance;      /**< q 轴电感 Lq，H（float）/ pu（定点） */
     mcl_scalar flux;            /**< 永磁磁链 ψ_f Wb（float）/ pu（定点），接口一致用 */
     mcl_scalar gain;            /**< 滑模电压上限 Kslide，float: V / fixed: voltage pu */
     mcl_scalar lpf;             /**< 最低电气转速 rad/s（float）/ ω_pu（定点），滤波系数下限 */
     mcl_scalar boundary;        /**< 线性滑模区最大电流误差 MaxSMCError（AN1078=0.005） */
+    mcl_scalar ld;              /**< d 轴电感 H。0 = 未设置，按 inductance（隐极） */
 } mcl_observer_smo_params;
 
 /**
@@ -47,6 +48,8 @@ typedef struct
     mcl_scalar seed_omega;          /**< 有符号开环速度提示；0=释放到自适应估速 */
     mcl_scalar filter_step;         /**< 实际低通系数 [0, 0.5]，交接时平滑变化 */
     mcl_scalar phase;               /**< 补偿后的转子角；调试使用，不重复计算固定补偿 */
+    mcl_scalar i_alpha_last;        /**< 上一拍实测 iα，seed 时算 id */
+    mcl_scalar i_beta_last;         /**< 上一拍实测 iβ */
 } mcl_observer_smo;
 
 /**

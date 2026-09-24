@@ -11,6 +11,34 @@
 #include "mcl_math.h"
 #include <math.h>
 
+/* id² + iq² ≤ i_max²。iq 本身已超限时 id 只能为 0。 */
+static float mtpa_clamp_circle(float id, float iq, float i_max)
+{
+    float iq_abs = iq >= 0.0f ? iq : -iq;
+    float room;
+    float id_lim;
+
+    if (i_max <= 0.0f)
+    {
+        return 0.0f;
+    }
+    if (iq_abs >= i_max)
+    {
+        return 0.0f;
+    }
+    room = i_max * i_max - iq_abs * iq_abs;
+    id_lim = sqrtf(room);
+    if (id > id_lim)
+    {
+        id = id_lim;
+    }
+    if (id < -id_lim)
+    {
+        id = -id_lim;
+    }
+    return id;
+}
+
 void mcl_mtpa_fw_init(mcl_mtpa_fw *self, mcl_scalar ld, mcl_scalar lq,
                       mcl_scalar lambda, mcl_scalar i_max)
 {
@@ -56,6 +84,7 @@ void mcl_mtpa_fw_id_ref(mcl_mtpa_fw *self, mcl_scalar iq_ref, mcl_scalar speed,
         float disc = sqrtf(lambda * lambda + 8.0f * dl * dl * iq * iq);
         id = (lambda - disc) / (4.0f * dl);
     }
+    id = mtpa_clamp_circle(id, iq, (float)MCL_TO_FLOAT(self->i_max));
 
     /* 弱磁：超基速时按电压极限反解 Id，取更负者
        V_limit = vbus/√3（SVPWM 线性调制区最大相电压幅值）
@@ -63,7 +92,7 @@ void mcl_mtpa_fw_id_ref(mcl_mtpa_fw *self, mcl_scalar iq_ref, mcl_scalar speed,
     {
         float spd = (float)MCL_TO_FLOAT(speed);
         float vb = (float)MCL_TO_FLOAT(vbus);
-        if (spd > 0.0f)
+        if (spd > 0.0f && ld > 0.0f)
         {
             float v_limit = vb / 1.7320508f;
             float id_fw = (v_limit / spd - lambda) / ld;
@@ -74,7 +103,7 @@ void mcl_mtpa_fw_id_ref(mcl_mtpa_fw *self, mcl_scalar iq_ref, mcl_scalar speed,
         }
     }
 
-    /* 限幅到弱磁下限（防过度弱磁） */
+    /* 限幅到弱磁下限（防过度弱磁），再收进电流圆 */
     {
         float id_min = (float)MCL_TO_FLOAT(self->fw_id_min);
         if (id < id_min)
@@ -82,6 +111,7 @@ void mcl_mtpa_fw_id_ref(mcl_mtpa_fw *self, mcl_scalar iq_ref, mcl_scalar speed,
             id = id_min;
         }
     }
+    id = mtpa_clamp_circle(id, iq, (float)MCL_TO_FLOAT(self->i_max));
 
     *id_ref = MCL_FROM_FLOAT(id);
 }

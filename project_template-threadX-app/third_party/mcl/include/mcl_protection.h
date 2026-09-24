@@ -18,8 +18,7 @@ extern "C" {
 typedef struct
 {
     mcl_protection_limits limits;   /**< 阈值 */
-    mcl_scalar stall_timer;              /**< 堵转计时 s */
-    bool  stalled;                  /**< 是否已判定堵转 */
+    mcl_protection_status status;   /**< 本拍宿主输入 */
 } mcl_protection;
 
 /**
@@ -29,6 +28,9 @@ typedef struct
  */
 void mcl_protection_init(mcl_protection *self, const mcl_protection_limits *limits);
 
+/** 写入本拍保护输入。未调用时输入为 0。 */
+void mcl_protection_set_status(mcl_protection *self, const mcl_protection_status *status);
+
 /**
  * @brief 保护检测（每个控制周期调用）
  * @param self  实例
@@ -37,7 +39,7 @@ void mcl_protection_init(mcl_protection *self, const mcl_protection_limits *limi
  * @param ic    C 相电流 A
  * @param vbus  母线电压 V
  * @param temp  温度 ℃（电机或功率级，取更高者）
- * @param speed 转速 rad/s（堵转判定）
+ * @param speed 转速 rad/s（超速/欠速判定）
  * @param dt    控制周期 s
  * @return MCL_FAULT_NONE 或首个触发的故障码
  */

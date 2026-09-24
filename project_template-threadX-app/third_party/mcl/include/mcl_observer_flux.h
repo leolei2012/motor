@@ -28,8 +28,9 @@ typedef struct
 {
     mcl_scalar lambda;               /**< 永磁磁链 Wb */
     mcl_scalar resistance;           /**< 相电阻 Ω */
-    mcl_scalar inductance;           /**< 相电感 H */
+    mcl_scalar inductance;           /**< q 轴电感 Lq，H */
     mcl_scalar gain;                 /**< 观测器增益（越大收敛越快） */
+    mcl_scalar ld;                   /**< d 轴电感 H。0 = 未设置，按 inductance（隐极） */
 } mcl_observer_flux_params;
 
 /**

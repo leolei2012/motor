@@ -460,8 +460,7 @@ static void foc_setup(mcl *motor, mcl_hal_ops *hal, foc_hal_t *hctx,
     cfg.limits.overvoltage = 100.0f;
     cfg.limits.undervoltage = -100.0f;
     cfg.limits.overtemp = 1000.0f;
-    cfg.limits.stall_speed = 0.0f;
-    cfg.limits.stall_time = 100.0f;
+
     /* 场景 6/7 测闭环跟踪（非启动），禁用自动开环；
        自动开环零速启动由 tests/term_sim.c 场景 4 覆盖 */
     cfg.openloop_rpm = 0.0f;

@@ -164,8 +164,7 @@ int main(void)
     cfg.limits.overvoltage = MCL_FROM_FLOAT(10.0f);
     cfg.limits.undervoltage = MCL_FROM_FLOAT(-10.0f);
     cfg.limits.overtemp = MCL_FROM_FLOAT(1000.0f);
-    cfg.limits.stall_speed = (mcl_scalar)0;
-    cfg.limits.stall_time = MCL_FROM_FLOAT(100000.0f);
+
 
     mcl_init(&motor, &cfg, &hal, &hctx, NULL, NULL, NULL);
     mcl_set_mode(&motor, MCL_MODE_FOC_SENSORED);

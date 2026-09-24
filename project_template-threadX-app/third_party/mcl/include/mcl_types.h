@@ -262,9 +262,27 @@ typedef enum
     MCL_FAULT_OVERCURRENT,      /**< 过流 */
     MCL_FAULT_OVERVOLTAGE,      /**< 过压 */
     MCL_FAULT_UNDERVOLTAGE,     /**< 欠压 */
-    MCL_FAULT_OVERTEMP,         /**< 过温 */
+    MCL_FAULT_OVERTEMP,         /**< 过温（电机与功率级取高者，兼容旧阈值） */
     MCL_FAULT_STALL,            /**< 堵转 */
-    MCL_FAULT_DRV,              /**< 门驱故障（nFAULT 引脚，宿主上报） */
+    MCL_FAULT_DRV,              /**< 门驱故障（nFAULT） */
+    MCL_FAULT_ABS_OVERCURRENT,  /**< 绝对过流 */
+    MCL_FAULT_OVERTEMP_FET,     /**< 功率级过温 */
+    MCL_FAULT_OVERTEMP_MOTOR,   /**< 电机过温 */
+    MCL_FAULT_GATE_OVERVOLTAGE, /**< 栅极驱动过压 */
+    MCL_FAULT_GATE_UNDERVOLTAGE,/**< 栅极驱动欠压 */
+    MCL_FAULT_SINCOS_LOW,       /**< 正余弦幅值过低 */
+    MCL_FAULT_SINCOS_HIGH,      /**< 正余弦幅值过高 */
+    MCL_FAULT_OFFSET_1,         /**< 电流传感器 1 零偏过大 */
+    MCL_FAULT_OFFSET_2,         /**< 电流传感器 2 零偏过大 */
+    MCL_FAULT_OFFSET_3,         /**< 电流传感器 3 零偏过大 */
+    MCL_FAULT_UNBALANCED,       /**< 三相电流不平衡 */
+    MCL_FAULT_BRK,              /**< 制动故障 */
+    MCL_FAULT_RESOLVER_LOT,     /**< 旋变跟踪丢失 */
+    MCL_FAULT_RESOLVER_DOS,     /**< 旋变信号幅度异常 */
+    MCL_FAULT_RESOLVER_LOS,     /**< 旋变信号丢失 */
+    MCL_FAULT_OVERSPEED,        /**< 超速 */
+    MCL_FAULT_UNDERSPEED,       /**< 欠速 */
+    MCL_FAULT_ABS_OVERSPEED,    /**< 绝对超速 */
 } mcl_fault;
 
 /* ============================ 反馈类型 ============================ */
@@ -319,10 +337,24 @@ typedef struct
 #define MCL_PROTECT_OVERVOLTAGE    (1u << 1)  /**< 过压 */
 #define MCL_PROTECT_UNDERVOLTAGE   (1u << 2)  /**< 欠压 */
 #define MCL_PROTECT_OVERTEMP       (1u << 3)  /**< 过温（含降额） */
-#define MCL_PROTECT_STALL          (1u << 4)  /**< 堵转 */
+#define MCL_PROTECT_ABS_OVERCURRENT (1u << 5) /**< 绝对过流 */
+#define MCL_PROTECT_OVERTEMP_FET   (1u << 6)  /**< 功率级过温 */
+#define MCL_PROTECT_OVERTEMP_MOTOR (1u << 7)  /**< 电机过温 */
+#define MCL_PROTECT_GATE_OV        (1u << 8)  /**< 栅极驱动过压 */
+#define MCL_PROTECT_GATE_UV        (1u << 9)  /**< 栅极驱动欠压 */
+#define MCL_PROTECT_DRV            (1u << 10) /**< 门驱故障 */
+#define MCL_PROTECT_SINCOS_LOW     (1u << 11) /**< 正余弦幅值过低 */
+#define MCL_PROTECT_SINCOS_HIGH    (1u << 12) /**< 正余弦幅值过高 */
+#define MCL_PROTECT_OFFSET         (1u << 13) /**< 三相电流零偏过大 */
+#define MCL_PROTECT_UNBALANCED     (1u << 14) /**< 三相电流不平衡 */
+#define MCL_PROTECT_BRK            (1u << 15) /**< 制动故障 */
+#define MCL_PROTECT_RESOLVER       (1u << 16) /**< 旋变 LOT/DOS/LOS */
+#define MCL_PROTECT_OVERSPEED      (1u << 17) /**< 超速 */
+#define MCL_PROTECT_UNDERSPEED     (1u << 18) /**< 欠速 */
+#define MCL_PROTECT_ABS_OVERSPEED  (1u << 19) /**< 绝对超速 */
+/* 不含新增项。新增项默认关，避免没有传感器时零输入误报。 */
 #define MCL_PROTECT_ALL            (MCL_PROTECT_OVERCURRENT | MCL_PROTECT_OVERVOLTAGE | \
-                                    MCL_PROTECT_UNDERVOLTAGE | MCL_PROTECT_OVERTEMP | \
-                                    MCL_PROTECT_STALL)
+                                    MCL_PROTECT_UNDERVOLTAGE | MCL_PROTECT_OVERTEMP)
 
 typedef struct
 {
@@ -332,9 +364,36 @@ typedef struct
     mcl_scalar undervoltage;       /**< 欠压阈值 V */
     mcl_scalar temp_derate_start;  /**< 温度降额起始 ℃（低于此不降额） */
     mcl_scalar overtemp;           /**< 过温关断阈值 ℃ */
-    mcl_scalar stall_speed;        /**< 堵转判定转速 rad/s */
-    mcl_scalar stall_time;         /**< 堵转判定时间 s */
+    mcl_scalar abs_overcurrent;    /**< 绝对过流 A */
+    mcl_scalar overtemp_fet;       /**< 功率级过温 ℃ */
+    mcl_scalar overtemp_motor;     /**< 电机过温 ℃ */
+    mcl_scalar gate_overvoltage;   /**< 栅极驱动过压 V */
+    mcl_scalar gate_undervoltage;  /**< 栅极驱动欠压 V */
+    mcl_scalar sincos_min;         /**< 正余弦幅值下限 */
+    mcl_scalar sincos_max;         /**< 正余弦幅值上限 */
+    mcl_scalar offset_max;         /**< 电流零偏绝对值上限 A */
+    mcl_scalar unbalanced_max;     /**< |ia+ib+ic| 上限 A */
+    mcl_scalar overspeed;          /**< 超速 rad/s，与保护函数的 speed 同单位 */
+    mcl_scalar underspeed;         /**< 欠速 rad/s。0 = 不比较 */
+    mcl_scalar abs_overspeed;      /**< 绝对超速 rad/s */
 } mcl_protection_limits;
+
+/**
+ * 本拍由宿主填入的保护输入。没有的传感器保持 0，且不要打开对应使能位。
+ */
+typedef struct
+{
+    mcl_scalar temp_fet;           /**< 功率级温度 ℃ */
+    mcl_scalar temp_motor;         /**< 电机温度 ℃ */
+    mcl_scalar gate_voltage;       /**< 栅极驱动供电 V */
+    mcl_scalar sincos_amplitude;   /**< 正余弦幅值 */
+    mcl_scalar current_offset[3];  /**< 三相零偏 A */
+    uint8_t    drv_fault;          /**< 门驱故障脚，非 0 为故障 */
+    uint8_t    brake_fault;        /**< 制动故障，非 0 为故障 */
+    uint8_t    resolver_lot;       /**< 旋变跟踪丢失 */
+    uint8_t    resolver_dos;       /**< 旋变幅度异常 */
+    uint8_t    resolver_los;       /**< 旋变信号丢失 */
+} mcl_protection_status;
 
 /* ============================ 反馈配置 ============================ */
 

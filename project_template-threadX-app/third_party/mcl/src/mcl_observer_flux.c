@@ -13,6 +13,38 @@
 
 #include "mcl_observer_flux.h"
 #include "mcl_math.h"
+#include <math.h>
+
+/* ld<=0 或等于 Lq 时返回永磁磁链，隐极路径与改前一致。 */
+static mcl_scalar flux_active(const mcl_observer_flux *self,
+                              mcl_scalar i_alpha, mcl_scalar i_beta,
+                              mcl_scalar theta)
+{
+    float ld = (float)MCL_TO_FLOAT(self->params.ld);
+    float lq = (float)MCL_TO_FLOAT(self->params.inductance);
+    float lambda = (float)MCL_TO_FLOAT(self->params.lambda);
+    float id;
+    float active;
+
+    if (ld <= 0.0f || ld == lq)
+    {
+        return self->params.lambda;
+    }
+    {
+        float th = (float)MCL_TO_FLOAT(theta);
+#if defined(MCL_USE_Q15) || defined(MCL_USE_Q31)
+        th *= 6.28318530718f; /* atan2 定点返回圈数 */
+#endif
+        id = (float)MCL_TO_FLOAT(i_alpha) * cosf(th) +
+             (float)MCL_TO_FLOAT(i_beta) * sinf(th);
+    }
+    active = lambda + (ld - lq) * id;
+    if (active < lambda * 0.2f)
+    {
+        active = lambda * 0.2f;
+    }
+    return MCL_FROM_FLOAT(active);
+}
 
 #ifndef MCL_DISABLE_OBSERVER
 
@@ -80,7 +112,9 @@ static void flux_update(void *impl, mcl_scalar v_alpha, mcl_scalar v_beta,
        消除纯积分直流漂移（gain 越大收敛越快；gain=0 关闭） */
     if (self->params.gain > (mcl_scalar)0 && self->lambda_est > (mcl_scalar)0)
     {
-        mcl_scalar err = MCL_SUB(self->lambda_est, self->params.lambda);
+        mcl_scalar lambda_nom = flux_active(self, i_alpha, i_beta,
+                                            mcl_math_atan2(lambda_beta, lambda_alpha));
+        mcl_scalar err = MCL_SUB(self->lambda_est, lambda_nom);
         mcl_scalar ux = MCL_DIV(lambda_alpha, self->lambda_est);
         mcl_scalar uy = MCL_DIV(lambda_beta, self->lambda_est);
         mcl_scalar corr = MCL_MUL(MCL_MUL(self->params.gain, err), dt);
@@ -120,10 +154,23 @@ static void flux_seed(void *impl, mcl_scalar flux_alpha, mcl_scalar flux_beta)
     }
 
     /* 内部状态 x1/x2 是定子磁链 ψ_s = 转子磁链 λ_r + L*i。
-       seed 给定真实转子磁链（输出无修正角，seed 亦无需预旋转）。 */
-    self->x1 = MCL_ADD(flux_alpha, MCL_MUL(self->params.inductance, self->i_alpha_last));
-    self->x2 = MCL_ADD(flux_beta,  MCL_MUL(self->params.inductance, self->i_beta_last));
-    self->lambda_est = self->params.lambda;
+       传入矢量按永磁磁链幅值时，凸极再缩放到有功磁链。 */
+    {
+        float pm = (float)MCL_TO_FLOAT(self->params.lambda);
+        mcl_scalar theta = mcl_math_atan2(flux_beta, flux_alpha);
+        mcl_scalar active = flux_active(self, self->i_alpha_last,
+                                        self->i_beta_last, theta);
+        float scale = 1.0f;
+        if (pm > 1.0e-8f)
+        {
+            scale = (float)MCL_TO_FLOAT(active) / pm;
+        }
+        self->x1 = MCL_ADD(MCL_MUL(flux_alpha, MCL_FROM_FLOAT(scale)),
+                           MCL_MUL(self->params.inductance, self->i_alpha_last));
+        self->x2 = MCL_ADD(MCL_MUL(flux_beta, MCL_FROM_FLOAT(scale)),
+                           MCL_MUL(self->params.inductance, self->i_beta_last));
+        self->lambda_est = active;
+    }
 }
 
 const mcl_observer_ops mcl_observer_flux_ops = {

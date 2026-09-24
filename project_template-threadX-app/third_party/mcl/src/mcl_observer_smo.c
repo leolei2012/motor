@@ -56,6 +56,8 @@ static void smo_reset(void *impl)
     self->filter_step = (mcl_scalar)0;
     self->phase = (mcl_scalar)0;
     self->dt = (mcl_scalar)0;
+    self->i_alpha_last = (mcl_scalar)0;
+    self->i_beta_last = (mcl_scalar)0;
 }
 
 void mcl_observer_smo_set_seed_omega(void *impl, mcl_scalar omega)
@@ -194,6 +196,8 @@ static void smo_update(void *impl, mcl_scalar v_alpha, mcl_scalar v_beta,
     if (ratio > 10.0f) { ratio = 10.0f; }
     correction = atan2f(3.0f * ratio, 2.0f - ratio * ratio);
     self->phase = smo_angle(raw + direction * correction + (step < 0.0f ? MCL_PI : 0.0f));
+    self->i_alpha_last = i_alpha;
+    self->i_beta_last = i_beta;
     if (phase_rad != NULL) { *phase_rad = self->phase; }
     if (speed_rad_s != NULL) { *speed_rad_s = MCL_DIV(self->w_est, dt); }
 }
@@ -208,6 +212,26 @@ static void smo_seed(void *impl, mcl_scalar flux_alpha, mcl_scalar flux_beta)
     theta = smo_radians(mcl_math_atan2(flux_beta, flux_alpha));
     magnitude = sqrtf(MCL_TO_FLOAT(flux_alpha) * MCL_TO_FLOAT(flux_alpha) +
                       MCL_TO_FLOAT(flux_beta) * MCL_TO_FLOAT(flux_beta)) * omega;
+    /* ld>0 且不等于 Lq 时，幅值按有功磁链 λ+(Ld-Lq)·id。id=0 或隐极时与 λ·ω 相同。 */
+    {
+        float lq = MCL_TO_FLOAT(self->params.inductance);
+        float ld = MCL_TO_FLOAT(self->params.ld);
+        float lambda_pm = MCL_TO_FLOAT(self->params.flux);
+        float th = smo_radians(self->phase);
+        float id;
+        float lambda_a;
+        if (ld > 0.0f && lq > 0.0f && ld != lq && lambda_pm > 1.0e-8f)
+        {
+            id = MCL_TO_FLOAT(self->i_alpha_last) * cosf(th) +
+                 MCL_TO_FLOAT(self->i_beta_last) * sinf(th);
+            lambda_a = lambda_pm + (ld - lq) * id;
+            if (lambda_a < lambda_pm * 0.2f)
+            {
+                lambda_a = lambda_pm * 0.2f;
+            }
+            magnitude *= lambda_a / lambda_pm;
+        }
+    }
     /* Consistent two-stage steady-state seed at |omega|/cutoff=1:
      * E1/Etrue=1/(2+j), E2/Etrue=1/((1+j)(2+j)), Z=Etrue-E1.
      * Do not seed both filters to the full physical EMF. */

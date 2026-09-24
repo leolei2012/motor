@@ -14,6 +14,38 @@
 
 #include "mcl_observer_ortega.h"
 #include "mcl_math.h"
+#include <math.h>
+
+/* ld<=0 或等于 Lq 时返回永磁磁链，隐极路径与改前一致。 */
+static mcl_scalar ortega_active_flux(const mcl_observer_ortega *self,
+                                     mcl_scalar i_alpha, mcl_scalar i_beta,
+                                     mcl_scalar theta)
+{
+    float ld = (float)MCL_TO_FLOAT(self->params.ld);
+    float lq = (float)MCL_TO_FLOAT(self->params.inductance);
+    float lambda = (float)MCL_TO_FLOAT(self->params.lambda);
+    float id;
+    float active;
+
+    if (ld <= 0.0f || ld == lq)
+    {
+        return self->params.lambda;
+    }
+    {
+        float th = (float)MCL_TO_FLOAT(theta);
+#if defined(MCL_USE_Q15) || defined(MCL_USE_Q31)
+        th *= 6.28318530718f; /* atan2 定点返回圈数 */
+#endif
+        id = (float)MCL_TO_FLOAT(i_alpha) * cosf(th) +
+             (float)MCL_TO_FLOAT(i_beta) * sinf(th);
+    }
+    active = lambda + (ld - lq) * id;
+    if (active < lambda * 0.2f)
+    {
+        active = lambda * 0.2f;
+    }
+    return MCL_FROM_FLOAT(active);
+}
 
 #ifndef MCL_DISABLE_OBSERVER
 
@@ -100,9 +132,11 @@ static void ortega_update(void *impl, mcl_scalar v_alpha, mcl_scalar v_beta,
     L_ia = MCL_MUL(L, i_alpha);
     L_ib = MCL_MUL(L, i_beta);
 
-    /* 估计转子磁链（更新前） */
+    /* 估计转子磁链（更新前）。凸极时收敛目标是有功磁链，不是固定永磁磁链。 */
     lambda_alpha = MCL_SUB(self->x1, L_ia);
     lambda_beta = MCL_SUB(self->x2, L_ib);
+    lambda = ortega_active_flux(self, i_alpha, i_beta,
+                                mcl_math_atan2(lambda_beta, lambda_alpha));
 
     /* 幅值平方误差：err = |λ_nom|² − |λ_est|²，VESC 原版「非对称 clamp」：
        err>0（磁链偏小）时置 0 —— 这是 Ortega 论文（Bernard-Praly 2017）的收敛性
@@ -197,10 +231,24 @@ static void ortega_seed(void *impl, mcl_scalar flux_alpha, mcl_scalar flux_beta)
         return;
     }
 
-    /* 定子磁链 = 转子磁链 + L*i（用上一拍电流近似当前） */
-    self->x1 = MCL_ADD(flux_alpha, MCL_MUL(self->params.inductance, self->i_alpha_last));
-    self->x2 = MCL_ADD(flux_beta, MCL_MUL(self->params.inductance, self->i_beta_last));
-    self->lambda_est = self->params.lambda;
+    /* 定子磁链 = 转子磁链 + L*i（用上一拍电流近似当前）。
+       传入矢量按永磁磁链幅值时，凸极再缩放到有功磁链。 */
+    {
+        float pm = (float)MCL_TO_FLOAT(self->params.lambda);
+        mcl_scalar theta = mcl_math_atan2(flux_beta, flux_alpha);
+        mcl_scalar active = ortega_active_flux(self, self->i_alpha_last,
+                                               self->i_beta_last, theta);
+        float scale = 1.0f;
+        if (pm > 1.0e-8f)
+        {
+            scale = (float)MCL_TO_FLOAT(active) / pm;
+        }
+        self->x1 = MCL_ADD(MCL_MUL(flux_alpha, MCL_FROM_FLOAT(scale)),
+                           MCL_MUL(self->params.inductance, self->i_alpha_last));
+        self->x2 = MCL_ADD(MCL_MUL(flux_beta, MCL_FROM_FLOAT(scale)),
+                           MCL_MUL(self->params.inductance, self->i_beta_last));
+        self->lambda_est = active;
+    }
 }
 
 void mcl_observer_ortega_set_speed(void *impl, mcl_scalar speed)

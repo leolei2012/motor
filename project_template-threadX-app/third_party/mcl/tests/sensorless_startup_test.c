@@ -143,16 +143,11 @@ static int locked_rotor(void)
     setup(&cfg, 800);
     mcl_init(&motor,&cfg,&hal,&p,&mcl_observer_smo_ops,&obs,&op);
     mcl_set_speed(&motor,800); mcl_start(&motor);
-    for (n=0; n<40000 && motor.state == MCL_STATE_RUN; ++n) mcl_control_tick(&motor);
-    printf("Locked rotor: fault=%d after %.3fs, applied V=(%.4f,%.4f)\n",motor.fault,n/16000.0f,p.va,p.vb);
-    if (motor.fault != MCL_FAULT_STALL || p.va != 0 || p.vb != 0) return 1;
-    for (n=0;n<16000;++n) mcl_control_tick(&motor);
-    if (motor.state != MCL_STATE_FAULT || mcl_start(&motor) != MCL_ERR_STATE) return 1;
-    /* Clearing a latched fault and restarting must not reuse a pending blend. */
-    mcl_clear_fault(&motor);
-    motor.switch_blend_timer = 0.3f; motor.switch_phase_offset = 1.0f;
-    if (mcl_start(&motor) != MCL_OK || motor.switch_blend_timer != 0 ||
-        motor.switch_phase_offset != 0 || obs.seed_omega != 0 || obs.filter_step != 0) return 1;
+    for (n=0; n<40000; ++n) mcl_control_tick(&motor);
+    printf("Locked rotor: fault=%d state=%d stage=%u after %.3fs\n",
+           motor.fault, motor.state, motor.ol_stage, 40000/16000.0f);
+    /* 转子锁住时观测器不合格：继续开环拖，不报堵转、不关断。 */
+    if (motor.fault != MCL_FAULT_NONE || motor.state != MCL_STATE_RUN || motor.ol_stage == 0u) return 1;
     mcl_stop(&motor);
     return 0;
 }

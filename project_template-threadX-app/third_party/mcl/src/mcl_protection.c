@@ -4,6 +4,7 @@
  */
 
 #include "mcl_protection.h"
+#include <string.h>
 
 void mcl_protection_init(mcl_protection *self, const mcl_protection_limits *limits)
 {
@@ -13,8 +14,16 @@ void mcl_protection_init(mcl_protection *self, const mcl_protection_limits *limi
     }
 
     self->limits = *limits;
-    self->stall_timer = (mcl_scalar)0;
-    self->stalled = false;
+    memset(&self->status, 0, sizeof(self->status));
+}
+
+void mcl_protection_set_status(mcl_protection *self, const mcl_protection_status *status)
+{
+    if (self == NULL || status == NULL)
+    {
+        return;
+    }
+    self->status = *status;
 }
 
 mcl_fault mcl_protection_check(mcl_protection *self, mcl_scalar ia, mcl_scalar ib, mcl_scalar ic,
@@ -53,23 +62,107 @@ mcl_fault mcl_protection_check(mcl_protection *self, mcl_scalar ia, mcl_scalar i
         return MCL_FAULT_OVERTEMP;
     }
 
-    /* 堵转：速度低于阈值且持续超时 */
-    if (self->limits.enabled & MCL_PROTECT_STALL)
+    if ((self->limits.enabled & MCL_PROTECT_ABS_OVERCURRENT) &&
+        (MCL_ABS(ia) > self->limits.abs_overcurrent ||
+         MCL_ABS(ib) > self->limits.abs_overcurrent ||
+         MCL_ABS(ic) > self->limits.abs_overcurrent))
     {
-        if (MCL_ABS(speed) < self->limits.stall_speed)
+        return MCL_FAULT_ABS_OVERCURRENT;
+    }
+
+    if ((self->limits.enabled & MCL_PROTECT_OVERTEMP_FET) &&
+        self->status.temp_fet > self->limits.overtemp_fet)
+    {
+        return MCL_FAULT_OVERTEMP_FET;
+    }
+    if ((self->limits.enabled & MCL_PROTECT_OVERTEMP_MOTOR) &&
+        self->status.temp_motor > self->limits.overtemp_motor)
+    {
+        return MCL_FAULT_OVERTEMP_MOTOR;
+    }
+
+    if ((self->limits.enabled & MCL_PROTECT_GATE_OV) &&
+        self->status.gate_voltage > self->limits.gate_overvoltage)
+    {
+        return MCL_FAULT_GATE_OVERVOLTAGE;
+    }
+    if ((self->limits.enabled & MCL_PROTECT_GATE_UV) &&
+        self->limits.gate_undervoltage > (mcl_scalar)0 &&
+        self->status.gate_voltage < self->limits.gate_undervoltage)
+    {
+        return MCL_FAULT_GATE_UNDERVOLTAGE;
+    }
+    if ((self->limits.enabled & MCL_PROTECT_DRV) && self->status.drv_fault != 0u)
+    {
+        return MCL_FAULT_DRV;
+    }
+
+    if ((self->limits.enabled & MCL_PROTECT_SINCOS_LOW) &&
+        self->limits.sincos_min > (mcl_scalar)0 &&
+        self->status.sincos_amplitude < self->limits.sincos_min)
+    {
+        return MCL_FAULT_SINCOS_LOW;
+    }
+    if ((self->limits.enabled & MCL_PROTECT_SINCOS_HIGH) &&
+        self->limits.sincos_max > (mcl_scalar)0 &&
+        self->status.sincos_amplitude > self->limits.sincos_max)
+    {
+        return MCL_FAULT_SINCOS_HIGH;
+    }
+
+    if (self->limits.enabled & MCL_PROTECT_OFFSET)
+    {
+        if (MCL_ABS(self->status.current_offset[0]) > self->limits.offset_max)
         {
-            self->stall_timer = MCL_ADD(self->stall_timer, dt);
-            if (self->stall_timer > self->limits.stall_time)
-            {
-                self->stalled = true;
-                return MCL_FAULT_STALL;
-            }
+            return MCL_FAULT_OFFSET_1;
         }
-        else
+        if (MCL_ABS(self->status.current_offset[1]) > self->limits.offset_max)
         {
-            self->stall_timer = (mcl_scalar)0;
-            self->stalled = false;
+            return MCL_FAULT_OFFSET_2;
         }
+        if (MCL_ABS(self->status.current_offset[2]) > self->limits.offset_max)
+        {
+            return MCL_FAULT_OFFSET_3;
+        }
+    }
+
+    if (self->limits.enabled & MCL_PROTECT_UNBALANCED)
+    {
+        mcl_scalar sum = MCL_ADD(MCL_ADD(ia, ib), ic);
+        if (MCL_ABS(sum) > self->limits.unbalanced_max)
+        {
+            return MCL_FAULT_UNBALANCED;
+        }
+    }
+
+    if ((self->limits.enabled & MCL_PROTECT_BRK) && self->status.brake_fault != 0u)
+    {
+        return MCL_FAULT_BRK;
+    }
+    if (self->limits.enabled & MCL_PROTECT_RESOLVER)
+    {
+        if (self->status.resolver_lot != 0u) { return MCL_FAULT_RESOLVER_LOT; }
+        if (self->status.resolver_dos != 0u) { return MCL_FAULT_RESOLVER_DOS; }
+        if (self->status.resolver_los != 0u) { return MCL_FAULT_RESOLVER_LOS; }
+    }
+
+    if ((self->limits.enabled & MCL_PROTECT_OVERSPEED) &&
+        self->limits.overspeed > (mcl_scalar)0 &&
+        MCL_ABS(speed) > self->limits.overspeed)
+    {
+        return MCL_FAULT_OVERSPEED;
+    }
+    if ((self->limits.enabled & MCL_PROTECT_UNDERSPEED) &&
+        self->limits.underspeed > (mcl_scalar)0 &&
+        MCL_ABS(speed) < self->limits.underspeed)
+    {
+        return MCL_FAULT_UNDERSPEED;
+    }
+    if ((self->limits.enabled & MCL_PROTECT_ABS_OVERSPEED) &&
+        self->limits.abs_overspeed > (mcl_scalar)0 &&
+        MCL_ABS(speed) > self->limits.abs_overspeed)
+    {
+        return MCL_FAULT_ABS_OVERSPEED;
     }
 
     return MCL_FAULT_NONE;

@@ -156,8 +156,18 @@ void mcl_config_default(mcl_config *cfg)
     cfg->limits.undervoltage = MCL_FROM_FLOAT(0.5f);       /* 0.5 pu（保证 overvoltage > undervoltage） */
     cfg->limits.temp_derate_start = MCL_FROM_FLOAT(0.5f);  /* 0.5 pu */
     cfg->limits.overtemp = MCL_FROM_FLOAT(0.8f);           /* 0.8 pu */
-    cfg->limits.stall_speed = MCL_FROM_FLOAT(0.1f);        /* 0.1 pu */
-    cfg->limits.stall_time = MCL_FROM_FLOAT(0.5f);         /* 0.5 pu（时间已按 time_base 归一化语义） */
+    cfg->limits.abs_overcurrent = MCL_FROM_FLOAT(0.95f);
+    cfg->limits.overtemp_fet = MCL_FROM_FLOAT(0.8f);
+    cfg->limits.overtemp_motor = MCL_FROM_FLOAT(0.8f);
+    cfg->limits.gate_overvoltage = MCL_FROM_FLOAT(0.95f);
+    cfg->limits.gate_undervoltage = MCL_FROM_FLOAT(0.2f);
+    cfg->limits.sincos_min = MCL_FROM_FLOAT(0.05f);
+    cfg->limits.sincos_max = MCL_FROM_FLOAT(0.95f);
+    cfg->limits.offset_max = MCL_FROM_FLOAT(0.2f);
+    cfg->limits.unbalanced_max = MCL_FROM_FLOAT(0.2f);
+    cfg->limits.overspeed = MCL_FROM_FLOAT(0.8f);
+    cfg->limits.underspeed = (mcl_scalar)0;
+    cfg->limits.abs_overspeed = MCL_FROM_FLOAT(0.95f);
     cfg->fault_stop_time = MCL_FROM_FLOAT(1.0f);           /* 占用 1.0 边界值，宿主须按需改小 */
 #else
     cfg->limits.enabled = MCL_PROTECT_ALL;
@@ -166,8 +176,18 @@ void mcl_config_default(mcl_config *cfg)
     cfg->limits.undervoltage = MCL_FROM_FLOAT(8.0f);
     cfg->limits.temp_derate_start = MCL_FROM_FLOAT(80.0f);
     cfg->limits.overtemp = MCL_FROM_FLOAT(100.0f);
-    cfg->limits.stall_speed = MCL_FROM_FLOAT(1.0f);
-    cfg->limits.stall_time = MCL_FROM_FLOAT(0.5f);
+    cfg->limits.abs_overcurrent = MCL_FROM_FLOAT(20.0f);
+    cfg->limits.overtemp_fet = MCL_FROM_FLOAT(100.0f);
+    cfg->limits.overtemp_motor = MCL_FROM_FLOAT(100.0f);
+    cfg->limits.gate_overvoltage = MCL_FROM_FLOAT(20.0f);
+    cfg->limits.gate_undervoltage = MCL_FROM_FLOAT(8.0f);
+    cfg->limits.sincos_min = MCL_FROM_FLOAT(0.2f);
+    cfg->limits.sincos_max = MCL_FROM_FLOAT(1.5f);
+    cfg->limits.offset_max = MCL_FROM_FLOAT(2.0f);
+    cfg->limits.unbalanced_max = MCL_FROM_FLOAT(3.0f);
+    cfg->limits.overspeed = MCL_FROM_FLOAT(800.0f);
+    cfg->limits.underspeed = (mcl_scalar)0;
+    cfg->limits.abs_overspeed = MCL_FROM_FLOAT(1100.0f);
     cfg->fault_stop_time = MCL_FROM_FLOAT(1.0f);
 #endif
 
