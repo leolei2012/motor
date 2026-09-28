@@ -56,6 +56,19 @@ void mcl_foc_run(mcl_foc *self, mcl_scalar id, mcl_scalar iq,
        故前馈物理 V 须 ÷(vbus/2) 转 per-unit，否则前馈按 12× 过强施加、
        PI 积分被迫扛大偏置（实测 IF 开环拖动中 vd_pi≈+0.43、vq_pi≈-0.25）。
        vbus 过小（未采样/断线）时跳过前馈，防除零产生 ±inf。 */
+#if defined(MCL_USE_Q15) || defined(MCL_USE_Q31)
+    /* Fixed PI gains output V/V_BASE; normalize the combined voltage only
+       once, after adding feedforward, to obtain modulation (2*V/Vbus). */
+    if (vbus > 0)
+    {
+        vd_ff = MCL_NEG(MCL_MUL(MCL_MUL(speed, self->mtpa_fw.lq), iq));
+        vq_ff = MCL_MUL(speed, MCL_ADD(MCL_MUL(self->mtpa_fw.ld, id), self->mtpa_fw.lambda));
+        *vd = MCL_DIV(MCL_ADD(vd_pi, vd_ff), MCL_MUL(vbus, MCL_FROM_FLOAT(0.5f)));
+        *vq = MCL_DIV(MCL_ADD(vq_pi, vq_ff), MCL_MUL(vbus, MCL_FROM_FLOAT(0.5f)));
+    }
+    else { *vd = *vq = 0; }
+    return;
+#else
     if (vbus > MCL_FROM_FLOAT(1.0f))
     {
         vd_ff = MCL_DIV(MCL_NEG(MCL_MUL(MCL_MUL(speed, self->mtpa_fw.lq), iq)),
@@ -71,4 +84,5 @@ void mcl_foc_run(mcl_foc *self, mcl_scalar id, mcl_scalar iq,
 
     *vd = MCL_ADD(vd_pi, vd_ff);
     *vq = MCL_ADD(vq_pi, vq_ff);
+#endif
 }

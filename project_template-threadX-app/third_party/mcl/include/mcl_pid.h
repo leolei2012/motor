@@ -21,6 +21,10 @@ typedef struct
     mcl_scalar i_term;          /**< 积分项 */
     mcl_scalar prev_error;      /**< 上次误差（微分用） */
     mcl_scalar prev_out;        /**< 上次输出 */
+#if defined(MCL_USE_Q15) || defined(MCL_USE_Q31)
+    int64_t aw_remainder;       /**< 亚 LSB 积分余数，避免小误差下积分停滞 */
+    int64_t aw_tracking_remainder; /**< 回算余数，与误差积分分别累积 */
+#endif
 } mcl_pid;
 
 /**

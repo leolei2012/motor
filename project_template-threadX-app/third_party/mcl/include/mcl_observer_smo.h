@@ -49,6 +49,9 @@ typedef struct
     mcl_scalar filter_step;         /**< 实际低通系数 [0, 0.5]，交接时平滑变化 */
     mcl_scalar phase;               /**< 补偿后的转子角；调试使用，不重复计算固定补偿 */
     mcl_scalar i_alpha_last;        /**< 上一拍实测 iα，seed 时算 id */
+#if defined(MCL_USE_Q15)
+    int32_t filter_remainder[6];   /**< Sub-LSB carry for adaptive/EMF/speed filters. */
+#endif
     mcl_scalar i_beta_last;         /**< 上一拍实测 iβ */
 } mcl_observer_smo;
 

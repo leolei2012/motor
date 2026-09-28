@@ -53,7 +53,7 @@ typedef struct
     mcl_config cfg;             /**< 配置快照 */
     mcl_mode   mode;            /**< 运行模式 */
     mcl_state  state;           /**< 运行状态 */
-    mcl_fault  fault;           /**< 当前故障 */
+    mcl_fault  fault;           /**< 只读兼容镜像；实际故障由 protection 管理 */
 
     const mcl_hal_ops *hal;     /**< HAL 注入 */
     void              *hal_ctx; /**< HAL 上下文 */
@@ -82,6 +82,10 @@ typedef struct
     mcl_scalar speed_rad_s;     /**< 当前速度 rad/s */
     mcl_scalar fb_speed_filt;   /**< 速度环反馈低通滤波值 rad/s（只滤反馈，不碰前馈/前向） */
     mcl_scalar vbus;            /**< 母线电压缓存 V */
+    mcl_scalar avs_scale;       /**< Allowed regenerative torque fraction, 0..1 */
+    mcl_scalar avs_recovery_step; /**< 每个电流 tick 的制动力恢复比例 */
+    mcl_scalar speed_aw_gain;   /**< 每个速度 tick 的积分回算比例 */
+    mcl_scalar iq_applied;      /**< Iq after AVS/temperature limits */
     mcl_scalar id_now;          /**< 当前 Id A */
     mcl_scalar id_cmd;          /**< MTPA 的 id 指令斜坡 A。开环期间为 0 */
     mcl_scalar iq_now;          /**< 当前 Iq A */
@@ -93,22 +97,20 @@ typedef struct
     mcl_scalar openloop_angle;  /**< 开环累计相位 rad */
     mcl_scalar openloop_phase;  /**< 开环固定相位 rad（预定位） */
     mcl_scalar openloop_mag;    /**< 开环幅值（VF：电压标幺 [-1,1]；IF/ALIGN：电流 A） */
-    mcl_scalar ol_timer;        /**< 自动开环序列倒计时 s（>0 表示正在开环） */
-    mcl_scalar ol_hyst_timer;   /**< 自动开环低速迟滞计时 s */
-    mcl_scalar ol_anchor_timer; /**< 切闭环后观测器锚定倒计时 s（>0：继续 seed 观测器到当前帧角，等电流重定向瞬态衰减） */
+    float ol_timer;        /**< 自动开环序列倒计时 s（>0 表示正在开环） */
+    float ol_hyst_timer;   /**< 自动开环低速迟滞计时 s */
+    float ol_anchor_timer; /**< 切闭环后观测器锚定倒计时 s（>0：继续 seed 观测器到当前帧角，等电流重定向瞬态衰减） */
     mcl_scalar ol_speed;        /**< 自动开环当前电气角速度 rad/s */
     mcl_scalar ol_phase;        /**< 自动开环积分相位 rad */
-    mcl_scalar switch_blend_timer; /**< 切闭环后电流参考平滑过渡倒计时 s（>0：iq_ref 从拖动电流渐变到速度环输出，
+    float switch_blend_timer; /**< 切闭环后电流参考平滑过渡倒计时 s（>0：iq_ref 从拖动电流渐变到速度环输出，
                                         消除切闭环转矩阶跃对转子摆动的激励） */
     mcl_scalar switch_blend_iq0;   /**< 平滑过渡起点电流（=拖动电流，带方向） A */
     mcl_scalar switch_phase_offset; /**< 开环角相对 PLL 角的最短偏差，切换期逐渐归零 */
-    mcl_scalar ol_lock_timer;      /**< SMO 速度/幅值持续合格的时间 */
-    mcl_scalar ol_wait_timer;      /**< 斜坡结束后等待 SMO 收敛的时间 */
+    float ol_lock_timer;      /**< SMO 速度/幅值持续合格的时间 */
+    float ol_wait_timer;      /**< 斜坡结束后等待 SMO 收敛的时间 */
     uint8_t   ol_stage;         /**< 自动开环阶段：0=未开环 1=锁定(对齐) 2=拖动 */
     uint8_t   ol_started_once;  /**< 是否已完成启动斜坡（重拖跳过锁定段） */
     uint32_t tick_count;        /**< 控制周期计数（分频用） */
-    mcl_fault_info fault_info;  /**< 故障现场快照 */
-    mcl_scalar fault_timer;     /**< 故障恢复计时 s */
 } mcl;
 
 /* ============================ 生命周期 ============================ */

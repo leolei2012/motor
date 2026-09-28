@@ -12,6 +12,15 @@
 extern "C" {
 #endif
 
+/** One control sample; values use the same physical/per-unit basis as limits.
+ * current is the diagnostic current (Iq for FOC); ia/ib/ic drive detection. */
+typedef struct
+{
+    mcl_scalar ia, ib, ic;
+    mcl_scalar vbus, temp, speed, current;
+    uint32_t tick;
+} mcl_protection_sample;
+
 /**
  * @brief 保护检测状态
  */
@@ -19,6 +28,10 @@ typedef struct
 {
     mcl_protection_limits limits;   /**< 阈值 */
     mcl_protection_status status;   /**< 本拍宿主输入 */
+    mcl_fault fault;               /**< Latched first fault; NONE after clear. */
+    mcl_fault_info info;           /**< First-fault snapshot; retained after clear. */
+    float recovery_time_s;         /**< 0 disables automatic clear. */
+    float recovery_elapsed_s;      /**< Physical seconds in every precision. */
 } mcl_protection;
 
 /**
@@ -30,6 +43,28 @@ void mcl_protection_init(mcl_protection *self, const mcl_protection_limits *limi
 
 /** 写入本拍保护输入。未调用时输入为 0。 */
 void mcl_protection_set_status(mcl_protection *self, const mcl_protection_status *status);
+
+/** Change configuration without discarding a latched fault or its snapshot. */
+void mcl_protection_configure(mcl_protection *self,
+                             const mcl_protection_limits *limits, float recovery_time_s);
+
+/** Detect and latch a fault. No HAL access or PWM writes. */
+mcl_fault mcl_protection_update(mcl_protection *self, const mcl_protection_sample *sample);
+
+/** Latch an externally detected fault; repeated reports preserve the first event. */
+int mcl_protection_assert(mcl_protection *self, mcl_fault fault,
+                          const mcl_protection_sample *sample);
+mcl_fault mcl_protection_get_fault(const mcl_protection *self);
+int mcl_protection_get_fault_info(const mcl_protection *self, mcl_fault_info *out);
+
+/** Explicit acknowledgement. Caller must ensure the motor is stopped.
+ * Retains the historical snapshot; does not start the motor or reset hardware. */
+void mcl_protection_clear(mcl_protection *self);
+
+/** Advance the legacy automatic-clear delay in physical seconds.
+ * Returns true only when the latch was cleared; caller returns motor to IDLE.
+ * This is a timed acknowledgement, not proof that an external fault disappeared. */
+bool mcl_protection_advance(mcl_protection *self, float dt_s);
 
 /**
  * @brief 保护检测（每个控制周期调用）

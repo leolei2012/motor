@@ -38,8 +38,15 @@ static void channel_sample(struct drv_ain_sensor_channel *ch)
     /* 非阻塞两拍: 读上一拍触发的结果 + EMA, 再触发下一拍。
      * 规则组与 16kHz 注入组共享 ADC1, 阻塞等 EOC 会饿死调度器(跑飞),
      * 这里让转换在两次 1kHz 节拍之间(1ms)完成, 完全不阻塞。 */
-    uint16_t raw = hal_adc1_reg_read_result();
-    ch->filtered_adc = ema_update(&ch->ema, raw);
+    uint16_t raw;
+    if (hal_adc1_reg_try_read(&raw))
+    {
+        ch->raw_adc = raw;
+        if (!ch->valid) { ch->ema.output = raw; }
+        ch->filtered_adc = ema_update(&ch->ema, raw);
+        ch->valid = 1u;
+    }
+    else { ch->missed_samples++; }
     hal_adc1_reg_trigger_channel(ch->adc_channel);
 }
 
@@ -77,6 +84,15 @@ void drv_ain_sensor_tim_isr(struct drv_ain_sensor *self)
     }
 
     channel_sample(&self->bus_voltage.ch);
+    if (self->bus_voltage.ch.valid)
+    {
+        /* Conservative envelope: respond to rises in one sample, release
+           gradually. Slow display EMA must never hide regeneration. */
+        uint32_t measured = bus_voltage_get_voltage_mv(self->bus_voltage.ch.raw_adc);
+        uint32_t previous = self->bus_voltage.voltage_mv;
+        self->bus_voltage.voltage_mv = measured >= previous ? measured
+            : previous - (previous - measured + 3u) / 4u;
+    }
 }
 
 
@@ -91,7 +107,6 @@ void drv_ain_sensor_poll(struct drv_ain_sensor *self)
         return;
     }
 
-    self->bus_voltage.voltage_mv   = bus_voltage_get_voltage_mv(self->bus_voltage.ch.filtered_adc);
     self->bus_voltage.voltage_raw_d = self->bus_voltage.ch.filtered_adc;
 }
 

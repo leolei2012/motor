@@ -7,6 +7,7 @@
  */
 
 #include "mcl.h"
+#include "mcl_avs.h"
 #include "mcl_observer_ortega.h"
 #include "mcl_observer_smo.h"
 #include <string.h>
@@ -18,6 +19,49 @@
 #define MCL_SWITCH_BLEND_TIME 0.5f
 #define MCL_SMO_LOCK_TIME     0.02f
 #define MCL_SMO_WAIT_TIME     0.5f
+
+static void mcl_avs_configure(mcl *self)
+{
+    const mcl_config *cfg = &self->cfg;
+    /* Configuration-time float conversion only; fixed ISR stays integer. */
+    self->avs_recovery_step = cfg->avs_enabled ? MCL_FROM_FLOAT(
+        1.0f / ((float)cfg->current_loop_freq_hz * MCL_TO_FLOAT(cfg->avs_recovery_time))) : 0;
+    self->speed_aw_gain = cfg->speed_aw_time > 0 ? MCL_FROM_FLOAT(
+        (float)cfg->speed_loop_divider / ((float)cfg->speed_loop_divider +
+        (float)cfg->current_loop_freq_hz * MCL_TO_FLOAT(cfg->speed_aw_time))) : 0;
+}
+
+/* Protection owns the fault; the facade owns the motor/PWM transition. */
+static void mcl_apply_fault(mcl *self)
+{
+    self->fault = mcl_protection_get_fault(&self->protection);
+    self->state = MCL_STATE_FAULT;
+    if (self->hal != NULL && self->hal->pwm_set_duty != NULL)
+    {
+        self->hal->pwm_set_duty(self->hal_ctx, (mcl_scalar)0, (mcl_scalar)0, (mcl_scalar)0);
+    }
+}
+
+static mcl_scalar mcl_outer_pid_dt(const mcl *self, uint32_t divider)
+{
+#if defined(MCL_USE_Q15) || defined(MCL_USE_Q31)
+    (void)self; (void)divider;
+    return MCL_FROM_FLOAT(1.0f);
+#else
+    return mcl_mul_int(self->dt, divider);
+#endif
+}
+
+static void mcl_outer_pid_configure(mcl *self)
+{
+#if defined(MCL_USE_Q15) || defined(MCL_USE_Q31)
+    float tick = 1.0f / ((float)self->cfg.current_loop_freq_hz * MCL_TO_FLOAT(self->cfg.time_base));
+    self->pid_speed.params.ki = MCL_FROM_FLOAT(MCL_TO_FLOAT(self->cfg.speed_pid.ki) * tick * self->cfg.speed_loop_divider);
+    self->pid_pos.params.ki = MCL_FROM_FLOAT(MCL_TO_FLOAT(self->cfg.pos_pid.ki) * tick * self->cfg.pos_loop_divider);
+#else
+    (void)self;
+#endif
+}
 
 /* ============================ 角度回绕 ============================ */
 
@@ -58,6 +102,22 @@ static mcl_scalar mcl_wrap_full_turn(mcl_scalar x)
     }
     return x;
 }
+
+static mcl_scalar mcl_phase_add(mcl_scalar phase, mcl_scalar step)
+{
+#if defined(MCL_USE_Q15) || defined(MCL_USE_Q31)
+#if defined(MCL_USE_Q15)
+    const int64_t full = INT64_C(32768);
+#else
+    const int64_t full = INT64_C(2147483648);
+#endif
+    int64_t sum = ((int64_t)phase + step) % full;
+    if (sum < 0) { sum += full; }
+    return (mcl_scalar)sum;
+#else
+    return mcl_wrap_full_turn(phase + step);
+#endif
+}
 #endif
 
 /* ============================ 控制节拍内部实现 ============================ */
@@ -83,6 +143,7 @@ static void mcl_observer_seed_omega_set(const mcl_observer *obs, mcl_scalar omeg
 static void mcl_openloop_auto(mcl *self, mcl_scalar *phase, mcl_scalar *speed)
 {
     const mcl_scalar dt = self->dt;
+    const float seconds = 1.0f / (float)self->cfg.current_loop_freq_hz;
 #if defined(MCL_USE_Q15) || defined(MCL_USE_Q31)
     /* 定点：rpm_pu == 电气速度_pu，rpm↔rad/s 换算省略（见 mcl_fixed_point.md）。
        rpm_pu 到电气速度_pu 系数 = RAD_PER_S_PER_RPM × pp = 1（在各自基值下） */
@@ -90,14 +151,14 @@ static void mcl_openloop_auto(mcl *self, mcl_scalar *phase, mcl_scalar *speed)
 #else
     const mcl_scalar rpm_to_espeed = MCL_FROM_FLOAT(MCL_RAD_PER_S_PER_RPM * (float)self->cfg.pole_pairs);
 #endif
-    const mcl_scalar t_lock = self->cfg.openloop_time_lock;
-    const mcl_scalar t_ramp = self->cfg.openloop_time_ramp;
-    const mcl_scalar t_const = self->cfg.openloop_time;
-    const mcl_scalar total = MCL_ADD(MCL_ADD(t_lock, t_ramp), t_const);
+    const float t_lock = self->cfg.openloop_time_lock;
+    const float t_ramp = self->cfg.openloop_time_ramp;
+    const float t_const = self->cfg.openloop_time;
+    const float total = t_lock + t_ramp + t_const;
     mcl_scalar ol_rpm_max;
     mcl_scalar ol_speed_max;
     mcl_scalar ol_rpm;
-    mcl_scalar time_fwd;
+    float time_fwd;
     mcl_scalar dir;
     mcl_scalar sign;
     mcl_scalar s_ramp;
@@ -133,7 +194,7 @@ static void mcl_openloop_auto(mcl *self, mcl_scalar *phase, mcl_scalar *speed)
     {
         if (self->ol_hyst_timer < self->cfg.openloop_hyst)
         {
-            self->ol_hyst_timer = MCL_ADD(self->ol_hyst_timer, dt);
+            self->ol_hyst_timer = (self->ol_hyst_timer + seconds);
             if (self->ol_hyst_timer > self->cfg.openloop_hyst)
             {
                 self->ol_hyst_timer = self->cfg.openloop_hyst;
@@ -142,7 +203,7 @@ static void mcl_openloop_auto(mcl *self, mcl_scalar *phase, mcl_scalar *speed)
     }
     else if (self->ol_hyst_timer > (mcl_scalar)0)
     {
-        self->ol_hyst_timer = MCL_SUB(self->ol_hyst_timer, dt);
+        self->ol_hyst_timer = (self->ol_hyst_timer - seconds);
         if (self->ol_hyst_timer < (mcl_scalar)0)
         {
             self->ol_hyst_timer = (mcl_scalar)0;
@@ -171,7 +232,7 @@ static void mcl_openloop_auto(mcl *self, mcl_scalar *phase, mcl_scalar *speed)
            0.43~0.7V = 转子 100~200rpm 爬行）。重开环同样走斜坡：掉速后的转子
            从低转速重新被 15rpm→800rpm 斜坡牵回（旧「重开环直接全速」在转子
            掉到 ~200rpm 后无法牵入，只会原地爬行）。 */
-        time_fwd = MCL_SUB(total, self->ol_timer);
+        time_fwd = (total - self->ol_timer);
         if (time_fwd < t_lock && self->ol_started_once == 0u)
         {
             ol_rpm = (mcl_scalar)0;
@@ -181,7 +242,7 @@ static void mcl_openloop_auto(mcl *self, mcl_scalar *phase, mcl_scalar *speed)
         {
             self->ol_stage = 2;   /* 拖动：升余弦 S 形斜坡，从 15rpm 地板起步 */
             ol_rpm = ol_rpm_max;
-            if (time_fwd < MCL_ADD(t_lock, t_ramp))
+            if (time_fwd < (t_lock + t_ramp))
             {
                 /* S 形：ol_rpm = max/2·(1 − cos(π·(t−t_lock)/t_ramp))。
                    起点/终点加速度 = 0：线性斜坡终点 α 突变（279rad/s²→0）会激发
@@ -189,25 +250,25 @@ static void mcl_openloop_auto(mcl *self, mcl_scalar *phase, mcl_scalar *speed)
                    800→1046→…），摆动与速度环/观测器相互作用 → 闭环 ~1s 失锁。
                    S 形终点 α=0，转子在斜坡尾部已稳定跟随，切闭环无摆动。 */
 #if defined(MCL_USE_Q15) || defined(MCL_USE_Q31)
-                mcl_math_sincos(MCL_MUL(MCL_DIV(MCL_SUB(time_fwd, t_lock), t_ramp),
+                mcl_math_sincos(MCL_MUL(MCL_FROM_FLOAT((time_fwd - t_lock) / t_ramp),
                                         MCL_FROM_FLOAT(0.5f)), &s_ramp, &c_ramp);
 #else
-                mcl_math_sincos(MCL_MUL(MCL_DIV(MCL_SUB(time_fwd, t_lock), t_ramp),
+                mcl_math_sincos(MCL_MUL(MCL_FROM_FLOAT((time_fwd - t_lock) / t_ramp),
                                         MCL_FROM_FLOAT(3.14159265f)), &s_ramp, &c_ramp);
 #endif
-                ol_rpm = MCL_MUL(MCL_MUL(ol_rpm_max, MCL_FROM_FLOAT(0.5f)),
-                                 MCL_SUB(MCL_FROM_FLOAT(1.0f), c_ramp));
+                ol_rpm = MCL_MUL(ol_rpm_max, MCL_SUB(MCL_FROM_FLOAT(0.5f),
+                                 MCL_MUL(MCL_FROM_FLOAT(0.5f), c_ramp)));
             }
-            if (ol_rpm < MCL_FROM_FLOAT(15.0f))
+            if (ol_rpm < self->cfg.openloop_min_rpm)
             {
-                ol_rpm = MCL_FROM_FLOAT(15.0f); /* 牵入地板 15rpm（=1.25Hz 场频，转子可靠牵入） */
+                ol_rpm = self->cfg.openloop_min_rpm; /* 牵入地板 15rpm（=1.25Hz 场频，转子可靠牵入） */
             }
         }
 
         self->ol_speed = MCL_MUL(MCL_MUL(ol_rpm, rpm_to_espeed), sign);
 
         /* 锁定阶段相位固定；拖动阶段相位积分 */
-        self->ol_phase = mcl_wrap_full_turn(MCL_ADD(self->ol_phase, mcl_speed_to_phase_incr(self->ol_speed, dt)));
+        self->ol_phase = mcl_phase_add(self->ol_phase, mcl_speed_to_phase_incr(self->ol_speed, dt));
 
         *phase = self->ol_phase;
         *speed = self->ol_speed;
@@ -216,7 +277,7 @@ static void mcl_openloop_auto(mcl *self, mcl_scalar *phase, mcl_scalar *speed)
            让反电动势 e 在撒手前收敛到 ωλ；闭环后不再写，SMO 恢复自适应）。 */
         mcl_observer_seed_omega_set(&self->observer, self->ol_speed);
 
-        self->ol_timer = MCL_SUB(self->ol_timer, dt);
+        self->ol_timer = (self->ol_timer - seconds);
         if (self->ol_timer <= (mcl_scalar)0)
         {
             self->ol_timer = (mcl_scalar)0;
@@ -224,22 +285,24 @@ static void mcl_openloop_auto(mcl *self, mcl_scalar *phase, mcl_scalar *speed)
 
             /* 时间到了不盲切。SMO 的转速、反电动势和角度要连续合格才交出去。
                不合格就停在终点转速继续拖，不报堵转、不关 PWM。 */
-#if !defined(MCL_USE_Q15) && !defined(MCL_USE_Q31)
             if (self->observer.ops == &mcl_observer_smo_ops)
             {
                 mcl_observer_smo *obs = (mcl_observer_smo *)self->observer.impl;
-                mcl_scalar obs_speed = obs->w_est / dt;
-                mcl_scalar emf2 = obs->e_alpha_final * obs->e_alpha_final +
-                                  obs->e_beta_final * obs->e_beta_final;
-                mcl_scalar expected = MCL_ABS(self->ol_speed) * obs->params.flux * 0.31622777f;
-                mcl_scalar error = obs->phase - self->ol_phase;
+                float obs_speed = MCL_TO_FLOAT(obs->w_est) / MCL_TO_FLOAT(dt);
+                float ea = MCL_TO_FLOAT(obs->e_alpha_final), eb = MCL_TO_FLOAT(obs->e_beta_final);
+                float emf2 = ea * ea + eb * eb;
+                float expected = fabsf(MCL_TO_FLOAT(self->ol_speed)) * MCL_TO_FLOAT(obs->params.flux) * 0.31622777f;
+                float error = MCL_TO_FLOAT(MCL_SUB(obs->phase, self->ol_phase));
+#if defined(MCL_USE_Q15) || defined(MCL_USE_Q31)
+                error *= MCL_TWO_PI;
+#endif
                 while (error > MCL_PI) { error -= MCL_TWO_PI; }
                 while (error < -MCL_PI) { error += MCL_TWO_PI; }
-                if (MCL_ABS(obs_speed - self->ol_speed) < MCL_ABS(self->ol_speed) * 0.2f &&
+                if (fabsf(obs_speed - MCL_TO_FLOAT(self->ol_speed)) < fabsf(MCL_TO_FLOAT(self->ol_speed)) * 0.2f &&
                     emf2 > expected * expected * 0.25f &&
-                    emf2 < expected * expected * 2.25f && MCL_ABS(error) < 1.74532925f)
+                    emf2 < expected * expected * 2.25f && fabsf(error) < 1.74532925f)
                 {
-                    self->ol_lock_timer += dt;
+                    self->ol_lock_timer += seconds;
                 }
                 else
                 {
@@ -247,15 +310,14 @@ static void mcl_openloop_auto(mcl *self, mcl_scalar *phase, mcl_scalar *speed)
                 }
                 if (self->ol_lock_timer < MCL_SMO_LOCK_TIME)
                 {
-                    self->ol_timer = dt; /* 停在终点转速继续拖，不报故障 */
+                    self->ol_timer = seconds; /* 停在终点转速继续拖，不报故障 */
                     self->ol_hyst_timer = 0.0f;
                     return;
                 }
-                self->pll.speed = obs_speed;
-                self->pll.speed_est_fast = obs_speed;
+                self->pll.speed = MCL_FROM_FLOAT(obs_speed);
+                self->pll.speed_est_fast = MCL_FROM_FLOAT(obs_speed);
             }
             else
-#endif
             {
                 self->pll.speed = self->ol_speed;
                 self->pll.speed_est_fast = self->ol_speed;
@@ -274,16 +336,14 @@ static void mcl_openloop_auto(mcl *self, mcl_scalar *phase, mcl_scalar *speed)
             /* Keep the control frame continuous: PLL uses observer angle,
              * the frame offset decays together with the current reference.
              * No instantaneous rotation of the d/q PI state is then needed. */
-            self->switch_blend_timer = MCL_FROM_FLOAT(MCL_SWITCH_BLEND_TIME);
+            self->switch_blend_timer = MCL_SWITCH_BLEND_TIME;
             self->switch_blend_iq0 = (mcl_scalar)0;
             if (self->ctrl_mode != MCL_CTRL_CURRENT)
             {
                 /* 斜坡从当前开环转速起，积分清零。预置成拖动电流（约 3A）会在
                    空载上把转子一下推过最终目标。 */
                 self->speed_ramp_rpm = MCL_DIV(self->ol_speed, rpm_to_espeed);
-                self->pid_speed.i_term = (mcl_scalar)0;
-                self->pid_speed.prev_out = (mcl_scalar)0;
-                self->pid_speed.prev_error = (mcl_scalar)0;
+                mcl_pid_reset(&self->pid_speed);
                 self->iq_ref = (mcl_scalar)0;
             }
             mcl_observer_seed_omega_set(&self->observer, (mcl_scalar)0);
@@ -296,8 +356,8 @@ static void mcl_openloop_auto(mcl *self, mcl_scalar *phase, mcl_scalar *speed)
         self->ol_stage = 0;
         if (self->switch_blend_timer > (mcl_scalar)0)
         {
-            mcl_scalar blend = MCL_DIV(self->switch_blend_timer, MCL_FROM_FLOAT(MCL_SWITCH_BLEND_TIME));
-            *phase = mcl_wrap_full_turn(MCL_ADD(*phase, MCL_MUL(self->switch_phase_offset, blend)));
+            mcl_scalar blend = MCL_FROM_FLOAT(self->switch_blend_timer / MCL_SWITCH_BLEND_TIME);
+            *phase = mcl_phase_add(*phase, MCL_MUL(self->switch_phase_offset, blend));
         }
         self->ol_phase = *phase;
     }
@@ -394,17 +454,18 @@ static void mcl_control_tick_foc(mcl *self)
     /* 读温度（电机/FET 取更高者） */
     temp_max = (mcl_scalar)0;
     {
-        mcl_scalar t_motor = (mcl_scalar)0;
-        mcl_scalar t_fet = (mcl_scalar)0;
-        mcl_protection_status pst;
+        mcl_protection_status pst = self->protection.status;
+        mcl_scalar t_motor = pst.temp_motor;
+        mcl_scalar t_fet = pst.temp_fet;
         if (self->hal->read_temp != NULL &&
             self->hal->read_temp(self->hal_ctx, &t_motor, &t_fet) == MCL_OK)
         {
             temp_max = (t_motor > t_fet) ? t_motor : t_fet;
         }
-        memset(&pst, 0, sizeof(pst));
+        /* Preserve host inputs (gate faults, resolver, etc.) when refreshing ADC data. */
         pst.temp_fet = t_fet;
         pst.temp_motor = t_motor;
+        temp_max = (t_motor > t_fet) ? t_motor : t_fet;
         pst.current_offset[0] = self->cfg.current_offset[0];
         pst.current_offset[1] = self->cfg.current_offset[1];
         pst.current_offset[2] = self->cfg.current_offset[2];
@@ -463,8 +524,7 @@ static void mcl_control_tick_foc(mcl *self)
         self->ctrl_mode == MCL_CTRL_OPENLOOP_IF)
     {
         /* 旋转矢量：相位按 openloop_speed 积分斜坡前进 */
-        self->openloop_angle = mcl_wrap_full_turn(
-            MCL_ADD(self->openloop_angle, mcl_speed_to_phase_incr(self->openloop_speed, self->dt)));
+        self->openloop_angle = mcl_phase_add(self->openloop_angle, mcl_speed_to_phase_incr(self->openloop_speed, self->dt));
         phase = self->openloop_angle;
         speed = self->openloop_speed;
     }
@@ -481,6 +541,27 @@ static void mcl_control_tick_foc(mcl *self)
 
     /* 4. 外环（位置环 → 速度环 → 电流环，按分频级联） */
     iq_ref = self->iq_ref;
+    mcl_scalar avs_lower = self->cfg.speed_pid.out_min;
+    mcl_scalar avs_upper = self->cfg.speed_pid.out_max;
+    int speed_aw_enabled = self->cfg.speed_aw_time > (mcl_scalar)0;
+    int avs_enabled = self->cfg.avs_enabled && self->ol_stage == 0u &&
+        (self->ctrl_mode == MCL_CTRL_SPEED || self->ctrl_mode == MCL_CTRL_POSITION ||
+         self->ctrl_mode == MCL_CTRL_CURRENT);
+    if (avs_enabled || speed_aw_enabled)
+    {
+        mcl_scalar thermal_limit = MCL_MUL(self->cfg.rated_current, derate);
+        if (avs_lower < MCL_NEG(thermal_limit)) { avs_lower = MCL_NEG(thermal_limit); }
+        if (avs_upper > thermal_limit) { avs_upper = thermal_limit; }
+    }
+    if (avs_enabled)
+    {
+        self->avs_scale = mcl_avs_scale_update(self->avs_scale, vbus,
+            self->cfg.avs_start_voltage, self->cfg.avs_stop_voltage,
+            self->avs_recovery_step);
+        mcl_avs_bounds(speed, self->cfg.avs_speed_deadband, self->avs_scale,
+                       &avs_lower, &avs_upper);
+    }
+    else { self->avs_scale = MCL_FROM_FLOAT(1.0f); }
 
     /* 位置环（最外环）：输出速度参考 rpm */
 #ifndef MCL_DISABLE_POSITION
@@ -492,7 +573,7 @@ static void mcl_control_tick_foc(mcl *self)
             mcl_scalar pos_now = MCL_MUL(phase, MCL_FROM_FLOAT(1.0f / (float)self->cfg.pole_pairs));
             self->speed_ref_rpm = mcl_pid_run(&self->pid_pos,
                                               MCL_SUB(self->pos_ref_rad, pos_now),
-                                              MCL_MUL(self->dt, (mcl_scalar)self->cfg.pos_loop_divider));
+                                              mcl_outer_pid_dt(self, self->cfg.pos_loop_divider));
         }
     }
 #endif
@@ -503,15 +584,20 @@ static void mcl_control_tick_foc(mcl *self)
         if (self->ol_stage == 0u && self->cfg.speed_loop_divider > 0u &&
             (self->tick_count % (uint32_t)self->cfg.speed_loop_divider) == 0u)
         {
-            mcl_scalar speed_dt = MCL_MUL(self->dt, (mcl_scalar)self->cfg.speed_loop_divider);
-            mcl_scalar ref_rpm = mcl_speed_ref_ramped(self, speed_dt);
+#if defined(MCL_USE_Q15) || defined(MCL_USE_Q31)
+            mcl_scalar speed_dt = MCL_FROM_FLOAT(1.0f);
+#else
+            mcl_scalar speed_dt = self->dt * self->cfg.speed_loop_divider;
+#endif
+            mcl_scalar ref_rpm = mcl_speed_ref_ramped(self, MCL_FROM_FLOAT((float)self->cfg.speed_loop_divider / (float)self->cfg.current_loop_freq_hz));
 #if defined(MCL_USE_Q15) || defined(MCL_USE_Q31)
             /* 定点：speed 与 speed_ref_rpm 均已归一化（HAL/调用方在边界分别 ÷电气速度基值
                / ÷rpm 基值；两者数值相等，故直接比较，无 rpm↔rad/s 换算。
                详见 docs/spec/mcl_fixed_point.md） */
-            iq_ref = mcl_pid_run(&self->pid_speed,
-                                 MCL_SUB(ref_rpm, speed),
-                                 speed_dt);
+            iq_ref = speed_aw_enabled
+                ? mcl_speed_pid_limited(&self->pid_speed, MCL_SUB(ref_rpm, speed),
+                    speed_dt, avs_lower, avs_upper, self->speed_aw_gain)
+                : mcl_pid_run(&self->pid_speed, MCL_SUB(ref_rpm, speed), speed_dt);
 #else
             /* 速度环反馈直接取 PLL 瞬时估速，不再低通滤波。
                历史教训：曾加 20Hz 反馈滤波，但滤波滞后让速度环永远"追不上"
@@ -519,9 +605,10 @@ static void mcl_control_tick_foc(mcl *self)
                不回头、avg 320~385 偏高）。去掉滤波后反馈即时，速度环才能锁住 300。 */
             mcl_scalar fb_rpm = MCL_MUL(speed, MCL_FROM_FLOAT(MCL_RPM_PER_RAD_S /
                                         (float)self->cfg.pole_pairs));
-            iq_ref = mcl_pid_run(&self->pid_speed,
-                                 MCL_SUB(ref_rpm, fb_rpm),
-                                 speed_dt);
+            iq_ref = speed_aw_enabled
+                ? mcl_speed_pid_limited(&self->pid_speed, ref_rpm - fb_rpm,
+                    speed_dt, avs_lower, avs_upper, self->speed_aw_gain)
+                : mcl_pid_run(&self->pid_speed, MCL_SUB(ref_rpm, fb_rpm), speed_dt);
 #endif
         }
         self->iq_ref = iq_ref;
@@ -529,7 +616,7 @@ static void mcl_control_tick_foc(mcl *self)
         /* 角度掺混仍用这个计时。电流不再从拖动电流掺进来，否则斜坡期间 iq 一直是 3A。 */
         if (self->switch_blend_timer > (mcl_scalar)0)
         {
-            self->switch_blend_timer = MCL_SUB(self->switch_blend_timer, self->dt);
+            self->switch_blend_timer = (self->switch_blend_timer - 1.0f / (float)self->cfg.current_loop_freq_hz);
             if (self->switch_blend_timer < (mcl_scalar)0)
             {
                 self->switch_blend_timer = (mcl_scalar)0;
@@ -539,10 +626,10 @@ static void mcl_control_tick_foc(mcl *self)
 
     if (self->ctrl_mode == MCL_CTRL_CURRENT && self->switch_blend_timer > (mcl_scalar)0)
     {
-        mcl_scalar blend = MCL_DIV(self->switch_blend_timer, MCL_FROM_FLOAT(MCL_SWITCH_BLEND_TIME));
+        mcl_scalar blend = MCL_FROM_FLOAT(self->switch_blend_timer / MCL_SWITCH_BLEND_TIME);
         iq_ref = MCL_ADD(MCL_MUL(self->switch_blend_iq0, blend),
                         MCL_MUL(iq_ref, MCL_SUB(MCL_FROM_FLOAT(1.0f), blend)));
-        self->switch_blend_timer = MCL_SUB(self->switch_blend_timer, self->dt);
+        self->switch_blend_timer = (self->switch_blend_timer - 1.0f / (float)self->cfg.current_loop_freq_hz);
         if (self->switch_blend_timer < (mcl_scalar)0) { self->switch_blend_timer = (mcl_scalar)0; }
     }
 
@@ -553,6 +640,15 @@ static void mcl_control_tick_foc(mcl *self)
         if (iq_ref > iq_limit) { iq_ref = iq_limit; }
         if (iq_ref < MCL_NEG(iq_limit)) { iq_ref = MCL_NEG(iq_limit); }
     }
+
+    /* Guard every current tick, including ticks between speed PI updates.
+       Preserve external current-mode request so it can recover later. */
+    if (avs_enabled)
+    {
+        if (iq_ref < avs_lower) { iq_ref = avs_lower; }
+        if (iq_ref > avs_upper) { iq_ref = avs_upper; }
+    }
+    self->iq_applied = iq_ref;
 
     /* 5. 电流环：MTPA/弱磁 → Park → PI + 解耦前馈 → 反 Park → SVPWM */
     if (self->ctrl_mode == MCL_CTRL_OPENLOOP_VF)
@@ -604,7 +700,7 @@ static void mcl_control_tick_foc(mcl *self)
             mcl_scalar err;
             mcl_mtpa_fw_id_ref(&self->mtpa_fw, iq_ref, speed, vbus, &id_target);
             /* 凸极 MTPA 的 id 不要一拍跳变。额定电流走完约 0.3s；隐极目标是 0。 */
-            step = MCL_MUL(MCL_DIV(self->cfg.rated_current, MCL_FROM_FLOAT(0.3f)), self->dt);
+            step = MCL_MUL(self->cfg.rated_current, MCL_FROM_FLOAT(1.0f / (0.3f * (float)self->cfg.current_loop_freq_hz)));
             err = MCL_SUB(id_target, self->id_cmd);
             if (err > step)
             {
@@ -631,25 +727,17 @@ static void mcl_control_tick_foc(mcl *self)
     self->v_beta_prev = MCL_FROM_FLOAT((2.0f / 1.73205080757f) *
         (MCL_TO_FLOAT(db) - MCL_TO_FLOAT(dc)));
 
-    /* 6. 保护 */
-    fault = mcl_protection_check(&self->protection, ia, ib, ic, vbus,
-                                 temp_max, speed, self->dt);
+    /* 6. Submit the sample; protection owns detection, latch and snapshot. */
+    {
+        mcl_protection_sample sample;
+        sample.ia = ia; sample.ib = ib; sample.ic = ic;
+        sample.vbus = vbus; sample.temp = temp_max; sample.speed = speed;
+        sample.current = iq; sample.tick = self->tick_count;
+        fault = mcl_protection_update(&self->protection, &sample);
+    }
     if (fault != MCL_FAULT_NONE)
     {
-        self->fault = fault;
-        self->state = MCL_STATE_FAULT;
-        /* 记录故障现场快照（用于诊断） */
-        self->fault_info.fault = fault;
-        self->fault_info.current = iq;
-        self->fault_info.voltage = vbus;
-        self->fault_info.speed = speed;
-        self->fault_info.temp = temp_max;
-        self->fault_info.tick = self->tick_count;
-        self->fault_timer = (mcl_scalar)0;
-        if (self->hal->pwm_set_duty != NULL)
-        {
-            self->hal->pwm_set_duty(self->hal_ctx, (mcl_scalar)0, (mcl_scalar)0, (mcl_scalar)0);
-        }
+        mcl_apply_fault(self);
         return;
     }
 
@@ -738,6 +826,7 @@ int mcl_init(mcl *self, const mcl_config *cfg,
        后 mcl_control_tick 因 hal==NULL 每拍静默 return（tick 不增、duty 不更新）。 */
     if (mcl_config_validate(cfg) != MCL_OK)
     {
+        memset(&self->protection, 0, sizeof(self->protection));
         self->hal = NULL;
         self->hal_ctx = NULL;
         self->state = MCL_STATE_IDLE;
@@ -746,6 +835,11 @@ int mcl_init(mcl *self, const mcl_config *cfg,
     }
 
     self->cfg = *cfg;
+    /* Build any lazy trig table before the timer/ADC control interrupt starts. */
+    {
+        mcl_scalar sin_zero, cos_zero;
+        mcl_math_sincos((mcl_scalar)0, &sin_zero, &cos_zero);
+    }
     self->hal = hal;
     self->hal_ctx = hal_ctx;
     self->mode = MCL_MODE_FOC_SENSORLESS;
@@ -766,6 +860,7 @@ int mcl_init(mcl *self, const mcl_config *cfg,
     mcl_mtpa_fw_init(&self->mtpa_fw, cfg->phase_inductance, cfg->phase_inductance,
                      cfg->bemf_const, cfg->rated_current);
     mcl_protection_init(&self->protection, &cfg->limits);
+    mcl_protection_configure(&self->protection, &cfg->limits, cfg->fault_stop_time);
 
     self->iq_ref = (mcl_scalar)0;
     self->speed_ref_rpm = (mcl_scalar)0;
@@ -798,17 +893,15 @@ int mcl_init(mcl *self, const mcl_config *cfg,
     self->ol_lock_timer = (mcl_scalar)0;
     self->ol_wait_timer = (mcl_scalar)0;
     self->tick_count = 0u;
-    self->fault_timer = (mcl_scalar)0;
-    self->fault_info.fault = MCL_FAULT_NONE;
-    self->fault_info.current = (mcl_scalar)0;
-    self->fault_info.voltage = (mcl_scalar)0;
-    self->fault_info.speed = (mcl_scalar)0;
-    self->fault_info.temp = (mcl_scalar)0;
-    self->fault_info.tick = 0u;
 
     /* dt = 1/电流环频率 ÷ time_base 归一化（per-unit 时间 dt_pu = dt/T_BASE = dt·W_BASE）。
        time_base 默认 1.0 时保持物理秒；定点设 T_BASE（<1）消除 dt 的 Q15 量化误差。 */
-    self->dt = MCL_DIV(MCL_FROM_FLOAT(1.0f / (float)cfg->current_loop_freq_hz), cfg->time_base);
+    self->dt = MCL_FROM_FLOAT(1.0f / ((float)cfg->current_loop_freq_hz *
+                                    MCL_TO_FLOAT(cfg->time_base)));
+    mcl_outer_pid_configure(self);
+    /* Physical seconds for AVS/anti-windup, independent of motor base speed.
+       Conversion is initialization-only; the fixed-point ISR uses integers. */
+    mcl_avs_configure(self);
 
     return MCL_OK;
 }
@@ -829,12 +922,28 @@ void mcl_deinit(mcl *self)
 
 int mcl_set_config(mcl *self, const mcl_config *cfg)
 {
+    mcl_config checked;
     if (self == NULL || cfg == NULL)
     {
         return MCL_ERR_PARAM;
     }
 
-    /* 更新可运行时调整的字段（快照） */
+    /* Validate against timing/base values actually retained by this API. */
+    checked = *cfg;
+    checked.current_loop_freq_hz = self->cfg.current_loop_freq_hz;
+    checked.speed_loop_divider = self->cfg.speed_loop_divider;
+    checked.time_base = self->cfg.time_base;
+    checked.bus_voltage = self->cfg.bus_voltage;
+    if (mcl_config_validate(&checked) != MCL_OK) { return MCL_ERR_PARAM; }
+
+    /* 更新可运行时调整的字段（快照）；宿主必须避免与 control_tick 并发。 */
+    self->cfg.avs_enabled = cfg->avs_enabled;
+    self->cfg.avs_start_voltage = cfg->avs_start_voltage;
+    self->cfg.avs_stop_voltage = cfg->avs_stop_voltage;
+    self->cfg.avs_recovery_time = cfg->avs_recovery_time;
+    self->cfg.avs_speed_deadband = cfg->avs_speed_deadband;
+    self->cfg.speed_aw_time = cfg->speed_aw_time;
+    mcl_avs_configure(self);
     self->cfg.current_pid = cfg->current_pid;
     self->cfg.speed_pid = cfg->speed_pid;
     self->cfg.pos_pid = cfg->pos_pid;
@@ -851,7 +960,8 @@ int mcl_set_config(mcl *self, const mcl_config *cfg)
     mcl_pid_set_params(&self->foc.pid_q, &cfg->current_pid);
     mcl_pid_set_params(&self->pid_speed, &cfg->speed_pid);
     mcl_pid_set_params(&self->pid_pos, &cfg->pos_pid);
-    self->protection.limits = cfg->limits;
+    mcl_outer_pid_configure(self);
+    mcl_protection_configure(&self->protection, &cfg->limits, cfg->fault_stop_time);
 
     return MCL_OK;
 }
@@ -892,7 +1002,7 @@ int mcl_start(mcl *self)
     {
         return MCL_OK;
     }
-    if (self->fault != MCL_FAULT_NONE)
+    if (mcl_protection_get_fault(&self->protection) != MCL_FAULT_NONE)
     {
         return MCL_ERR_STATE;
     }
@@ -915,6 +1025,8 @@ int mcl_start(mcl *self)
     mcl_pid_reset(&self->foc.pid_d);
     mcl_pid_reset(&self->foc.pid_q);
     mcl_pid_reset(&self->pid_speed);
+    self->avs_scale = 0.0f; /* Restart with no braking, recover over configured time. */
+    self->iq_applied = (mcl_scalar)0;
 #ifndef MCL_DISABLE_OBSERVER
     mcl_observer_reset(&self->observer);
     mcl_pll_reset(&self->pll);
@@ -999,7 +1111,7 @@ int mcl_set_torque(mcl *self, mcl_scalar torque_nm)
        定点提示：T 与 λ 仍需按转矩/磁链 per-unit 基值归一化（见 mcl_fixed_point.md）。 */
     kt = MCL_FROM_FLOAT(2.0f / (3.0f * (float)self->cfg.pole_pairs));
     self->ctrl_mode = MCL_CTRL_CURRENT;
-    self->iq_ref = MCL_DIV(MCL_DIV(torque_nm, self->cfg.bemf_const), kt);
+    self->iq_ref = mcl_mul_div(torque_nm, kt, self->cfg.bemf_const);
     return MCL_OK;
 }
 
@@ -1092,7 +1204,7 @@ int mcl_get_fault(mcl *self, mcl_fault *out)
     {
         return MCL_ERR_PARAM;
     }
-    *out = self->fault;
+    *out = mcl_protection_get_fault(&self->protection);
     return MCL_OK;
 }
 
@@ -1102,35 +1214,24 @@ int mcl_get_fault_info(mcl *self, mcl_fault_info *out)
     {
         return MCL_ERR_PARAM;
     }
-    *out = self->fault_info;
-    return MCL_OK;
+    return mcl_protection_get_fault_info(&self->protection, out);
 }
 
 int mcl_fault_assert(mcl *self, mcl_fault fault)
 {
-    if (self == NULL || fault == MCL_FAULT_NONE)
-    {
-        return MCL_ERR_PARAM;
-    }
-
-    self->fault = fault;
-    self->state = MCL_STATE_FAULT;
-
-    /* 记录快照（硬件保护在中断里，用最近缓存值） */
-    self->fault_info.fault = fault;
-    self->fault_info.current = self->iq_now;
-    self->fault_info.voltage = self->vbus;
-    self->fault_info.speed = self->speed_rad_s;
-    self->fault_info.temp = (mcl_scalar)0;
-    self->fault_info.tick = self->tick_count;
-    self->fault_timer = (mcl_scalar)0;
-
-    /* 立即关断 PWM */
-    if (self->hal != NULL && self->hal->pwm_set_duty != NULL)
-    {
-        self->hal->pwm_set_duty(self->hal_ctx, (mcl_scalar)0, (mcl_scalar)0, (mcl_scalar)0);
-    }
-
+    mcl_protection_sample sample = {0};
+    int result;
+    if (self == NULL) { return MCL_ERR_PARAM; }
+    /* Hardware reports use the last available sample. */
+    sample.current = self->iq_now;
+    sample.vbus = self->vbus;
+    sample.speed = self->speed_rad_s;
+    sample.temp = self->protection.status.temp_motor > self->protection.status.temp_fet ?
+                  self->protection.status.temp_motor : self->protection.status.temp_fet;
+    sample.tick = self->tick_count;
+    result = mcl_protection_assert(&self->protection, fault, &sample);
+    if (result != MCL_OK) { return result; }
+    mcl_apply_fault(self);
     return MCL_OK;
 }
 
@@ -1144,9 +1245,9 @@ int mcl_clear_fault(mcl *self)
     {
         return MCL_ERR_STATE;
     }
-    self->fault = MCL_FAULT_NONE;
+    mcl_protection_clear(&self->protection);
+    self->fault = mcl_protection_get_fault(&self->protection);
     self->state = MCL_STATE_IDLE;
-    self->fault_timer = (mcl_scalar)0;
     return MCL_OK;
 }
 
@@ -1187,16 +1288,13 @@ void mcl_control_tick(mcl *self)
         return;
     }
 
-    /* 故障自动恢复计时（VESC 式：fault_stop_time 后自动恢复） */
-    if (self->state == MCL_STATE_FAULT && self->cfg.fault_stop_time > (mcl_scalar)0)
+    /* The protection module advances the physical-second acknowledgement timer.
+       Automatic clear returns to IDLE; it never restarts the motor. */
+    if (self->state == MCL_STATE_FAULT &&
+        mcl_protection_advance(&self->protection, 1.0f / (float)self->cfg.current_loop_freq_hz))
     {
-        self->fault_timer = MCL_ADD(self->fault_timer, self->dt);
-        if (self->fault_timer >= self->cfg.fault_stop_time)
-        {
-            self->state = MCL_STATE_IDLE;
-            self->fault = MCL_FAULT_NONE;
-            self->fault_timer = (mcl_scalar)0;
-        }
+        self->fault = mcl_protection_get_fault(&self->protection);
+        self->state = MCL_STATE_IDLE;
     }
 
     if (self->state != MCL_STATE_RUN)

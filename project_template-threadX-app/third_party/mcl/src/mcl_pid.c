@@ -44,6 +44,10 @@ void mcl_pid_reset(mcl_pid *self)
     self->i_term = (mcl_scalar)0;
     self->prev_error = (mcl_scalar)0;
     self->prev_out = (mcl_scalar)0;
+#if defined(MCL_USE_Q15) || defined(MCL_USE_Q31)
+    self->aw_remainder = 0;
+    self->aw_tracking_remainder = 0;
+#endif
 }
 
 mcl_scalar mcl_pid_run(mcl_pid *self, mcl_scalar error, mcl_scalar dt)
@@ -61,8 +65,20 @@ mcl_scalar mcl_pid_run(mcl_pid *self, mcl_scalar error, mcl_scalar dt)
     p_term = MCL_MUL(self->params.kp, error);
 
     /* 积分项：i_term += ki * error * dt，累加后按 i_min/i_max 限幅（抗积分饱和） */
+#if defined(MCL_USE_Q15)
+    {
+        /* Preserve both multiplication fractions, also when AVS is disabled. */
+        int64_t fraction = (int64_t)self->params.ki * error * dt + self->aw_remainder;
+        int64_t next = (int64_t)self->i_term + fraction / INT64_C(1073741824);
+        self->aw_remainder = fraction % INT64_C(1073741824);
+        if (next > self->params.i_max) { next = self->params.i_max; self->aw_remainder = 0; }
+        if (next < self->params.i_min) { next = self->params.i_min; self->aw_remainder = 0; }
+        self->i_term = (mcl_scalar)next;
+    }
+#else
     self->i_term = MCL_ADD(self->i_term,
                            MCL_MUL(MCL_MUL(self->params.ki, error), dt));
+#endif
     if (self->i_term > self->params.i_max)
     {
         self->i_term = self->params.i_max;

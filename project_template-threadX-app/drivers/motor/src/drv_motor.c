@@ -1,4 +1,6 @@
 #include "drv_motor.h"
+#include "drv_motor_units.h"
+#include "drv_motor_config.h"
 
 #include <math.h>
 #include <string.h>
@@ -75,21 +77,21 @@ static int drv_motor_adc_read_phase(void *ctx, mcl_scalar *ia, mcl_scalar *ib, m
     uint16_t ic_raw = hal_adc2_inj_read_jdr2();  /* W 相 (ADC2 rank2) */
 
 #if CURRENT_ADC_INVERT
-    *ia = (mcl_scalar)(((float)CURRENT_ADC_MID - (float)ia_raw) * CURRENT_ADC_SCALE_A);
-    *ib = (mcl_scalar)(((float)CURRENT_ADC_MID - (float)ib_raw) * CURRENT_ADC_SCALE_A);
-    *ic = (mcl_scalar)(((float)CURRENT_ADC_MID - (float)ic_raw) * CURRENT_ADC_SCALE_A);
+    *ia = mcl_from_physical((((float)CURRENT_ADC_MID - (float)ia_raw) * CURRENT_ADC_SCALE_A), DRV_MOTOR_I_BASE);
+    *ib = mcl_from_physical((((float)CURRENT_ADC_MID - (float)ib_raw) * CURRENT_ADC_SCALE_A), DRV_MOTOR_I_BASE);
+    *ic = mcl_from_physical((((float)CURRENT_ADC_MID - (float)ic_raw) * CURRENT_ADC_SCALE_A), DRV_MOTOR_I_BASE);
 #else
-    *ia = (mcl_scalar)(((float)ia_raw - CURRENT_ADC_MID) * CURRENT_ADC_SCALE_A);
-    *ib = (mcl_scalar)(((float)ib_raw - CURRENT_ADC_MID) * CURRENT_ADC_SCALE_A);
-    *ic = (mcl_scalar)(((float)ic_raw - CURRENT_ADC_MID) * CURRENT_ADC_SCALE_A);
+    *ia = mcl_from_physical((((float)ia_raw - CURRENT_ADC_MID) * CURRENT_ADC_SCALE_A), DRV_MOTOR_I_BASE);
+    *ib = mcl_from_physical((((float)ib_raw - CURRENT_ADC_MID) * CURRENT_ADC_SCALE_A), DRV_MOTOR_I_BASE);
+    *ic = mcl_from_physical((((float)ic_raw - CURRENT_ADC_MID) * CURRENT_ADC_SCALE_A), DRV_MOTOR_I_BASE);
 #endif
 
     /* 调试观测：保存减零漂后的三相电流（与 FOC 实际使用的一致） */
     if (self != NULL)
     {
-        self->ia_now = (float)(*ia - self->motor.cfg.current_offset[0]);
-        self->ib_now = (float)(*ib - self->motor.cfg.current_offset[1]);
-        self->ic_now = (float)(*ic - self->motor.cfg.current_offset[2]);
+        self->ia_now = mcl_to_physical(MCL_SUB(*ia, self->motor.cfg.current_offset[0]), DRV_MOTOR_I_BASE);
+        self->ib_now = mcl_to_physical(MCL_SUB(*ib, self->motor.cfg.current_offset[1]), DRV_MOTOR_I_BASE);
+        self->ic_now = mcl_to_physical(MCL_SUB(*ic, self->motor.cfg.current_offset[2]), DRV_MOTOR_I_BASE);
     }
 
     return MCL_OK;
@@ -109,11 +111,11 @@ static int drv_motor_adc_read_bus(void *ctx, mcl_scalar *vbus, mcl_scalar *ibus)
      */
     if (g_drv.ain_sensor != NULL && g_drv.ain_sensor->bus_voltage.voltage_mv > 0u)
     {
-        *vbus = (mcl_scalar)((float)g_drv.ain_sensor->bus_voltage.voltage_mv / 1000.0f);
+        *vbus = mcl_from_physical((float)g_drv.ain_sensor->bus_voltage.voltage_mv / 1000.0f, DRV_MOTOR_V_BASE);
     }
     else
     {
-        *vbus = 24.0f;
+        *vbus = MCL_CONFIG_VALUE(24.0f, DRV_MOTOR_V_BASE);
     }
     *ibus = 0.0f;
 
@@ -135,12 +137,12 @@ static void drv_motor_pwm_set_duty(void *ctx, mcl_scalar da, mcl_scalar db, mcl_
     if (!(da >= 0.0f)) { da = 0.0f; }
     if (!(db >= 0.0f)) { db = 0.0f; }
     if (!(dc >= 0.0f)) { dc = 0.0f; }
-    if (da > 1.0f) { da = 1.0f; }
-    if (db > 1.0f) { db = 1.0f; }
-    if (dc > 1.0f) { dc = 1.0f; }
-    cmp_a = (uint16_t)((float)da * (float)PWM_HALF_PERIOD);
-    cmp_b = (uint16_t)((float)db * (float)PWM_HALF_PERIOD);
-    cmp_c = (uint16_t)((float)dc * (float)PWM_HALF_PERIOD);
+    if (da > MCL_FROM_FLOAT(1.0f)) { da = MCL_FROM_FLOAT(1.0f); }
+    if (db > MCL_FROM_FLOAT(1.0f)) { db = MCL_FROM_FLOAT(1.0f); }
+    if (dc > MCL_FROM_FLOAT(1.0f)) { dc = MCL_FROM_FLOAT(1.0f); }
+    cmp_a = (uint16_t)(MCL_TO_FLOAT(da) * (float)PWM_HALF_PERIOD);
+    cmp_b = (uint16_t)(MCL_TO_FLOAT(db) * (float)PWM_HALF_PERIOD);
+    cmp_c = (uint16_t)(MCL_TO_FLOAT(dc) * (float)PWM_HALF_PERIOD);
     hal_tim1_set_duty_abc(cmp_a, cmp_b, cmp_c);
 }
 
@@ -189,114 +191,8 @@ int drv_motor_init(struct drv_motor *self)
 
     /* 电机配置：从 motor_control-v2.0 的 UserData_Motor.h / UserData_Parameter.h 抄录 */
     mcl_config cfg;
-    mcl_config_default(&cfg);
-
-    /* —— 电机实体参数（铭牌：极对数 5、相间电阻 0.95Ω、V_RMS 4.6V@1000rpm、
-       Ld 1.45/Lq 1.6mH @1kHz，均为「相间」值）——
-       星接(Y) 换算成相值：
-         - 相电阻 R_ph = R_LL/2 = 0.475Ω
-         - 相磁链 λ：V_ph_RMS = 4.6/√3 = 2.656V @1000rpm(机械)，
-           ω_el = 1000×2π/60×5(pole_pairs) = 523.6 rad/s，
-           λ = V_ph_RMS·√2/ω_el = 2.656×1.4142/523.6 ≈ 7.17mWb
-         - 相电感：d 轴 ≈ Ld/2 = 0.725mH、q 轴 ≈ Lq/2 = 0.80mH（凸极差 0.075mH） */
-    cfg.pole_pairs          = 5u;                /* 极对数 = 5（Poles=5，非 10） */
-    cfg.phase_resistance    = 0.475f;            /* 相电阻 = 线 0.95/2 */
-    cfg.phase_inductance    = 0.8e-3f;           /* 相电感 Lq（线 Lq 1.6mH/2） */
-    cfg.ld_lq_diff          = 0.075e-3f;         /* Lq-Ld = 0.80-0.725 = 0.075mH (IPMSM) */
-    cfg.bemf_const          = 7.17e-3f;          /* 相磁链 λ≈7.17mWb（由 4.6V@1000rpm、5 对极反解） */
-    cfg.rated_current       = 4.0f;               /* Qcur_MAX=4A */
-    cfg.rated_speed_rpm     = 3000.0f;            /* 参考值，默认保留 */
-    cfg.bus_voltage         = 24.0f;              /* VBUS=24V */
-
-    /* —— 运行频率 —— */
-    cfg.pwm_freq_hz         = 16000u;             /* 与 hal_tim1 PWM 一致 */
-    cfg.current_loop_freq_hz = 16000u;            /* 电流环 = PWM 频率 */
-    cfg.speed_loop_divider  = 16u;                /* 速度环 1kHz */
-
-    /* —— 反馈：无感 —— */
-    cfg.feedback.type = MCL_FEEDBACK_NONE;
-
-    /* —— 电流环 PID：物理目标 Kp=0.48V/A（L=1.6mH 时穿越频率 ≈300rad/s≈48Hz，
-          高于 100rpm 电频率 16.7Hz 约 3×）、Ki=48V/(A·s)（零点 100rad/s）。
-          per-unit 换算 ÷(vbus/2)=12V（v_pu=1 经 SVPWM 0.5 映射对应相电压 vbus/2）：
-          老工程 ÷24 是错的（比正确值小 2×，穿越仅 ~5Hz），且解耦前馈未换算，
-          导致 100rpm 拖动时 id≈-0.9A 的跟踪误差、切闭环电流重定向跟不上而失步。 */
-    cfg.current_pid.kp = 0.48f / 12.0f;           /* ≈ 0.04 */
-    cfg.current_pid.ki = 48.0f / 12.0f;           /* ≈ 4.0 */
-    cfg.current_pid.kd = 0.0f;
-    cfg.current_pid.out_min = -1.0f;
-    cfg.current_pid.out_max = 1.0f;
-    cfg.current_pid.i_min   = -1.0f;
-    cfg.current_pid.i_max   = 1.0f;
-
-    /* 速度环输出为 A，误差为机械 rpm。取消对未滤波估速的差分放大；
-       闭环电流上限与既有 3A 拖动一致，避免 1.5A 上限拖不动 800rpm 风扇。
-       这些增益须结合实际惯量/负载继续验证。 */
-    cfg.speed_pid.kp = 0.005f;
-    cfg.speed_pid.ki = 0.02f;
-    cfg.speed_pid.kd = 0.0f;
-    cfg.speed_pid.out_min = -3.0f;
-    cfg.speed_pid.out_max = 3.0f;
-    cfg.speed_pid.i_min   = -3.0f;
-    cfg.speed_pid.i_max   = 3.0f;
-    cfg.speed_ramp_rpm_s  = 500.0f;           /* 闭环指令斜坡 500 rpm/s：300→1000 约 1.4s */
-    /* PLL: wn=100rad/s (~16Hz), damping=1. The former 40/200 setting
-       lagged accelerating/decelerating rotor phase enough to cause re-drag
-       in the loaded plant regression. Keep speed-loop bandwidth lower. */
-    cfg.pll_kp = 200.0f;
-    cfg.pll_ki = 10000.0f;
-    /* —— 无感自动开环启动参数（VESC 式：锁定 → 斜坡 → 拖动 → 切 SMO 闭环）—— */
-    cfg.openloop_rpm        = 300.0f;        /* 开环只拖到 300rpm，切闭环后由速度环升到 800rpm */
-    cfg.openloop_drag_q     = 3.0f;           /* 开环拖动 q 轴电流 3A */
-    cfg.openloop_time_lock  = 0.0f;           /* 锁定对齐时间 0s（不锁定：锁定把转子吸到固定角，
-                                                可能停在 180° 不稳点 → 斜坡起步即失步（实测每次
-                                                上电牵入结果随机）。改为 15rpm 场频直接牵入
-                                                ——应用层 IF 测试已验证的可靠方式） */
-    cfg.openloop_time_ramp  = 1.5f;           /* 拖动斜坡 1.5s（原 0.3s 太陡：转子+风扇的惯量要求
-                                                J·α+风扇负载超过拖动转矩上限，转子落后磁场、打滑后
-                                                I/F 平均转矩≈0 再也牵不回来（实测反电动势停在
-                                                0.43~0.7V = 转子 100~200rpm 爬行）。配合斜坡从 ~0
-                                                起步（mcl.c 已去掉 10% 下限），1.5s → α≈279rad/s²
-                                                电角，3A 下裕量充足） */
-    cfg.openloop_time       = 0.05f;          /* 拖动匀速保持 0.05s（原 0.3s：斜坡结束磁场加速度突变，
-                                                转子负载角摆动，I/F 无阻尼、摆动发散失步——实测斜坡
-                                                段转子已到 800rpm（反电动势 2.86V），匀速段却掉到
-                                                ~200rpm（反电动势 0.75V）。斜坡一结束立刻切闭环，
-                                                让 PLL/速度环阻尼转子摆动） */
-    cfg.openloop_seed_angle = 1.5708f;           /* 已弃用：SMO 路径的 seed 角度改取「拖动期已收敛的
-                                                   观测器输出角」（≈转子磁链角，负载无关）——带载 I/F
-                                                   的转子超前量随负载变化，固定角 0°/π/2 都无法覆盖。
-                                                   字段保留供其他观测器使用。 */
-
-    /* 无温度传感器，不启用假温度保护。SMO 不合格只继续开环拖，不报堵转。 */
-    cfg.limits.enabled = MCL_PROTECT_OVERCURRENT | MCL_PROTECT_OVERVOLTAGE |
-                         MCL_PROTECT_UNDERVOLTAGE | MCL_PROTECT_ABS_OVERCURRENT |
-                         MCL_PROTECT_UNBALANCED |
-                         MCL_PROTECT_OVERSPEED | MCL_PROTECT_ABS_OVERSPEED;
-    cfg.fault_stop_time = 0.0f; /* 锁存故障，保留诊断现场，显式清故障后才能重启 */
-    cfg.limits.overcurrent  = 4.0f;               /* 过流 4A（与 D/Qcur_MAX 对齐） */
-    cfg.limits.overvoltage  = 48.0f;              /* VBUS_MAX=48V */
-    cfg.limits.undervoltage = 8.0f;               /* VBUS_MIN=8V */
-    cfg.limits.abs_overcurrent = 8.0f;
-    cfg.limits.offset_max = 2.0f;
-    cfg.limits.unbalanced_max = 3.0f;
-    cfg.limits.overspeed = 800.0f;                /* 电气 rad/s，约 1500 rpm */
-    cfg.limits.abs_overspeed = 1100.0f;           /* 电气 rad/s，约 2100 rpm */
-    cfg.limits.overtemp     = 80.0f;              /* Temp_MAX=80℃ */
-    cfg.limits.temp_derate_start = 80.0f;         /* 简化：80℃ 开始降额 */
-
-    /* SMO: gain in V, boundary in A. Retain 10V/0.5A: the local correction
-       slope is 20 ohm and dt*(R+gain/boundary)/L ~= 1.60 (<2).
-       Efinal is internally filtered (~0.316*omega*flux at steady state);
-       it must not be compared directly with the full physical back-EMF. */
     mcl_observer_smo_params op;
-    op.resistance = cfg.phase_resistance;   /* 0.475Ω 相电阻 */
-    op.inductance = cfg.phase_inductance;   /* Lq，0.80mH */
-    op.ld         = cfg.phase_inductance - cfg.ld_lq_diff; /* Ld；差为 0 时等于 Lq */
-    op.flux       = cfg.bemf_const;         /* 7.17mWb 永磁磁链 */
-    op.gain       = 10.0f;                  /* 滑模增益 Kslide=电压上限 V，需 > ωλ_max ≈7.5V */
-    op.lpf        = 6.28f;                  /* 最低电气转速 1Hz（=2π rad/s，滤波系数下限） */
-    op.boundary   = 0.5f;                   /* 线性滑模区电流误差 A（=额定 4A 的 1/8） */
+    drv_motor_config_default(&cfg, &op);
 
     if (mcl_init(&self->motor, &cfg, &s_mcl_hal, self,
                  &mcl_observer_smo_ops, &self->observer, &op) != MCL_OK)
@@ -402,7 +298,7 @@ int drv_motor_set_current(struct drv_motor *self, float iq_ref)
         return -1;
     }
 
-    if (mcl_set_current(&self->motor, (mcl_scalar)iq_ref) != MCL_OK)
+    if (mcl_set_current(&self->motor, mcl_from_physical(iq_ref, DRV_MOTOR_I_BASE)) != MCL_OK)
     {
         return -1;
     }
@@ -417,7 +313,7 @@ int drv_motor_set_speed(struct drv_motor *self, float speed_rpm)
         return -1;
     }
 
-    if (mcl_set_speed(&self->motor, (mcl_scalar)speed_rpm) != MCL_OK)
+    if (mcl_set_speed(&self->motor, mcl_from_physical(speed_rpm, DRV_MOTOR_RPM_BASE)) != MCL_OK)
     {
         return -1;
     }
@@ -432,7 +328,7 @@ int drv_motor_set_openloop_vf(struct drv_motor *self, float voltage, float speed
         return -1;
     }
 
-    if (mcl_set_openloop_vf(&self->motor, (mcl_scalar)voltage, (mcl_scalar)speed_rpm) != MCL_OK)
+    if (mcl_set_openloop_vf(&self->motor, mcl_from_physical(voltage, 1.0f), mcl_from_physical(speed_rpm, DRV_MOTOR_RPM_BASE)) != MCL_OK)
     {
         return -1;
     }
@@ -447,7 +343,7 @@ int drv_motor_set_openloop_if(struct drv_motor *self, float current, float speed
         return -1;
     }
 
-    if (mcl_set_openloop_if(&self->motor, (mcl_scalar)current, (mcl_scalar)speed_rpm) != MCL_OK)
+    if (mcl_set_openloop_if(&self->motor, mcl_from_physical(current, DRV_MOTOR_I_BASE), mcl_from_physical(speed_rpm, DRV_MOTOR_RPM_BASE)) != MCL_OK)
     {
         return -1;
     }
@@ -458,7 +354,7 @@ int drv_motor_set_openloop_if(struct drv_motor *self, float current, float speed
 /** 与控制实际使用的 SMO 补偿角一致，不在驱动层重复固定角度补偿。 */
 static float drv_observer_output_angle(struct drv_motor *self)
 {
-    return (float)self->observer.phase;
+    return mcl_to_physical(self->observer.phase, DRV_MOTOR_ANGLE_BASE);
 }
 /** 上一拍开环阶段（切换捕获用） */
 static uint8_t s_prev_ol_stage = 0u;
@@ -487,17 +383,17 @@ void drv_motor_control_isr(struct drv_motor *self)
     ol = (uint8_t)self->motor.ol_stage;
     if (ol == 2u)
     {
-        self->cap_pre_est = (float)self->motor.phase_rad;
+        self->cap_pre_est = mcl_to_physical(self->motor.phase_rad, DRV_MOTOR_ANGLE_BASE);
         self->cap_pre_lam = drv_observer_output_angle(self);
         self->cap_in_prev2 = self->cap_in_prev1;
-        self->cap_in_prev1 = (float)self->motor.pll.last_phase;   /* = 本拍 seed 前观测器输出（PLL 输入） */
+        self->cap_in_prev1 = mcl_to_physical(self->motor.pll.last_phase, DRV_MOTOR_ANGLE_BASE);   /* = 本拍 seed 前观测器输出（PLL 输入） */
     }
     else if (ol == 0u && s_prev_ol_stage == 2u && self->cap_valid == 0u)
     {
-        self->cap_post_est = (float)self->motor.phase_rad;
+        self->cap_post_est = mcl_to_physical(self->motor.phase_rad, DRV_MOTOR_ANGLE_BASE);
         self->cap_post_lam = drv_observer_output_angle(self);
-        self->cap_post_spd = (float)self->motor.speed_rad_s;
-        self->cap_pll_last = (float)self->motor.pll.last_phase;
+        self->cap_post_spd = mcl_to_physical(self->motor.speed_rad_s, DRV_MOTOR_W_BASE);
+        self->cap_pll_last = mcl_to_physical(self->motor.pll.last_phase, DRV_MOTOR_ANGLE_BASE);
         self->cap_valid = 1u;
     }
 
@@ -519,22 +415,22 @@ void drv_motor_control_isr(struct drv_motor *self)
             s_cap2_tick++;
             if (s_cap2_idx < 14u && s_cap2_tick == s_cap2_off[s_cap2_idx])
             {
-                self->cap2_frame[s_cap2_idx] = (float)self->motor.phase_rad;
+                self->cap2_frame[s_cap2_idx] = mcl_to_physical(self->motor.phase_rad, DRV_MOTOR_ANGLE_BASE);
                 self->cap2_obs[s_cap2_idx]   = (float)self->ia_now;                  /* 复用：i_α A（实测） */
                 self->cap2_spd[s_cap2_idx]   = (float)((self->ia_now + 2.0f * self->ib_now) * 0.57735027f); /* 复用：i_β A（实测） */
-                self->cap2_va[s_cap2_idx]    = (float)self->observer.i_alpha_hat;   /* 复用：i_hat_α A（SMO 估计） */
-                self->cap2_vb[s_cap2_idx]    = (float)self->observer.i_beta_hat;    /* 复用：i_hat_β A */
-                self->cap2_x1[s_cap2_idx]    = (float)self->observer.e_alpha_final; /* SMO 反电动势 α */
-                self->cap2_x2[s_cap2_idx]    = (float)self->observer.e_beta_final; /* SMO 反电动势 β */
-                self->cap2_lam[s_cap2_idx]   = (float)self->observer.z_alpha;  /* 复用：SMO 滑模输出 z_α */
+                self->cap2_va[s_cap2_idx]    = mcl_to_physical(self->observer.i_alpha_hat, DRV_MOTOR_I_BASE);   /* 复用：i_hat_α A（SMO 估计） */
+                self->cap2_vb[s_cap2_idx]    = mcl_to_physical(self->observer.i_beta_hat, DRV_MOTOR_I_BASE);    /* 复用：i_hat_β A */
+                self->cap2_x1[s_cap2_idx]    = mcl_to_physical(self->observer.e_alpha_final, DRV_MOTOR_V_BASE); /* SMO 反电动势 α */
+                self->cap2_x2[s_cap2_idx]    = mcl_to_physical(self->observer.e_beta_final, DRV_MOTOR_V_BASE); /* SMO 反电动势 β */
+                self->cap2_lam[s_cap2_idx]   = mcl_to_physical(self->observer.z_alpha, DRV_MOTOR_V_BASE);  /* 复用：SMO 滑模输出 z_α */
                 s_cap2_idx++;
             }
-            if ((float)self->motor.speed_rad_s < self->cap2_min_spd)
+            if (mcl_to_physical(self->motor.speed_rad_s, DRV_MOTOR_W_BASE) < self->cap2_min_spd)
             {
-                self->cap2_min_spd = (float)self->motor.speed_rad_s;
+                self->cap2_min_spd = mcl_to_physical(self->motor.speed_rad_s, DRV_MOTOR_W_BASE);
             }
             {
-                float aiq = (float)self->motor.iq_now;
+                float aiq = mcl_to_physical(self->motor.iq_now, DRV_MOTOR_I_BASE);
                 if (aiq < 0.0f) { aiq = -aiq; }
                 if (aiq > self->cap2_max_iq) { self->cap2_max_iq = aiq; }
             }
@@ -624,14 +520,14 @@ static int drv_motor_read_ia(struct drv_motor *self, float *ia)
     }
 
     a = MCL_SUB(a, self->motor.cfg.current_offset[0]);
-    *ia = (float)a;
+    *ia = mcl_to_physical(a, DRV_MOTOR_I_BASE);
     return 0;
 }
 
 /** 设中性占空比（三相 0.5 → 零电压） */
 static void drv_motor_pwm_neutral(struct drv_motor *self)
 {
-    drv_motor_pwm_set_duty(self, (mcl_scalar)0.5f, (mcl_scalar)0.5f, (mcl_scalar)0.5f);
+    drv_motor_pwm_set_duty(self, MCL_FROM_FLOAT(0.5f), MCL_FROM_FLOAT(0.5f), MCL_FROM_FLOAT(0.5f));
 }
 
 int drv_motor_measure_rl(struct drv_motor *self)
@@ -659,7 +555,7 @@ int drv_motor_measure_rl(struct drv_motor *self)
         mcl_scalar vb = (mcl_scalar)0;
         mcl_scalar ibus = (mcl_scalar)0;
         (void)drv_motor_adc_read_bus(self, &vb, &ibus);
-        vbus = (float)vb;
+        vbus = mcl_to_physical(vb, DRV_MOTOR_V_BASE);
     }
     if (vbus < 5.0f)
     {
@@ -673,9 +569,9 @@ int drv_motor_measure_rl(struct drv_motor *self)
      */
     {
         const float k = 0.05f;
-        drv_motor_pwm_set_duty(self, (mcl_scalar)(0.5f + k * 0.5f),
-                               (mcl_scalar)(0.5f - k * 0.25f),
-                               (mcl_scalar)(0.5f - k * 0.25f));
+        drv_motor_pwm_set_duty(self, MCL_FROM_FLOAT(0.5f + k * 0.5f),
+                               MCL_FROM_FLOAT(0.5f - k * 0.25f),
+                               MCL_FROM_FLOAT(0.5f - k * 0.25f));
         drv_motor_wait_us(100000u);   /* 等电流稳定（电气时间常数 L/R ~ms 级） */
 
         ia_sum = 0.0f;
@@ -722,9 +618,9 @@ int drv_motor_measure_rl(struct drv_motor *self)
         uint32_t c0;
         uint32_t c1;
 
-        drv_motor_pwm_set_duty(self, (mcl_scalar)(0.5f + k * 0.5f),
-                               (mcl_scalar)(0.5f - k * 0.25f),
-                               (mcl_scalar)(0.5f - k * 0.25f));
+        drv_motor_pwm_set_duty(self, MCL_FROM_FLOAT(0.5f + k * 0.5f),
+                               MCL_FROM_FLOAT(0.5f - k * 0.25f),
+                               MCL_FROM_FLOAT(0.5f - k * 0.25f));
         drv_motor_wait_ticks(2u);   /* 125µs：等占空比生效 + 初始电流建立 */
 
         if (drv_motor_read_ia(self, &ia0) != 0)
@@ -778,13 +674,13 @@ int drv_motor_measure_rl(struct drv_motor *self)
     l_meas = 0.8e-3f;
     r_meas = 0.475f;
 
-    self->observer.params.resistance = (mcl_scalar)r_meas;
-    self->observer.params.inductance = (mcl_scalar)l_meas;
-    self->observer.params.ld = (mcl_scalar)l_meas - self->motor.cfg.ld_lq_diff;
-    self->motor.cfg.phase_resistance = (mcl_scalar)r_meas;
-    self->motor.cfg.phase_inductance = (mcl_scalar)l_meas;
-    self->motor.foc.mtpa_fw.lq = (mcl_scalar)l_meas;
-    self->motor.foc.mtpa_fw.ld = (mcl_scalar)l_meas - self->motor.cfg.ld_lq_diff;
+    self->observer.params.resistance = mcl_from_physical(r_meas, DRV_MOTOR_R_BASE);
+    self->observer.params.inductance = mcl_from_physical(l_meas, DRV_MOTOR_L_BASE);
+    self->observer.params.ld = MCL_SUB(mcl_from_physical(l_meas, DRV_MOTOR_L_BASE), self->motor.cfg.ld_lq_diff);
+    self->motor.cfg.phase_resistance = mcl_from_physical(r_meas, DRV_MOTOR_R_BASE);
+    self->motor.cfg.phase_inductance = mcl_from_physical(l_meas, DRV_MOTOR_L_BASE);
+    self->motor.foc.mtpa_fw.lq = mcl_from_physical(l_meas, DRV_MOTOR_L_BASE);
+    self->motor.foc.mtpa_fw.ld = MCL_SUB(mcl_from_physical(l_meas, DRV_MOTOR_L_BASE), self->motor.cfg.ld_lq_diff);
 
     return 0;
 }

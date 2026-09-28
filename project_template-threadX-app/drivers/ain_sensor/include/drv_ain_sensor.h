@@ -47,6 +47,9 @@ struct drv_ain_sensor_channel
     uint32_t               sample_time;
     struct ema_filter_t    ema;
     uint16_t               filtered_adc;
+    uint16_t               raw_adc;
+    uint32_t               missed_samples;
+    uint8_t                valid;
 };
 
 /** ============================================================
@@ -58,7 +61,7 @@ struct drv_ain_sensor
     struct
     {
         struct drv_ain_sensor_channel ch;
-        uint32_t voltage_mv;  /**< 母线电压 (mV) */
+        volatile uint32_t voltage_mv;  /**< 1kHz control voltage, fast attack/slow release */
         uint16_t voltage_raw_d;  /**< u16Volt 格式 (ST 兼容) */
     } bus_voltage;
 

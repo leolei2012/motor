@@ -41,6 +41,9 @@ static void smo_reset(void *impl)
         return;
     }
 
+#if defined(MCL_USE_Q15)
+    { int n; for (n=0; n<6; ++n) { self->filter_remainder[n]=0; } }
+#endif
     self->i_alpha_hat = (mcl_scalar)0;
     self->i_beta_hat = (mcl_scalar)0;
     self->e_alpha = (mcl_scalar)0;
@@ -114,6 +117,21 @@ static mcl_scalar smo_angle(float angle)
 #endif
 }
 
+/* Preserve Q15 fractions: small LPF updates must accumulate, not vanish. */
+static mcl_scalar smo_filter(mcl_observer_smo *self, unsigned index,
+                             mcl_scalar state, mcl_scalar target, mcl_scalar gain)
+{
+#if defined(MCL_USE_Q15)
+    int32_t product = ((int32_t)target - state) * gain + self->filter_remainder[index];
+    int32_t increment = product / 32768;
+    self->filter_remainder[index] = product - increment * 32768;
+    return MCL_ADD(state, (mcl_scalar)increment);
+#else
+    (void)self; (void)index;
+    return MCL_ADD(state, MCL_MUL(gain, MCL_SUB(target, state)));
+#endif
+}
+
 static void smo_update(void *impl, mcl_scalar v_alpha, mcl_scalar v_beta,
                        mcl_scalar i_alpha, mcl_scalar i_beta, mcl_scalar dt,
                        mcl_scalar *phase_rad, mcl_scalar *speed_rad_s)
@@ -161,19 +179,16 @@ static void smo_update(void *impl, mcl_scalar v_alpha, mcl_scalar v_beta,
     /* Slow bandwidth adaptation avoids the positive feedback between
      * filter phase lag -> differentiated speed -> filter bandwidth.
      * At 16 kHz this is about 62.5ms; raw-speed smoothing is about 3ms. */
-    self->filter_step = MCL_ADD(self->filter_step,
-        MCL_MUL(MCL_FROM_FLOAT(0.001f), MCL_SUB(MCL_FROM_FLOAT(target), self->filter_step)));
+    self->filter_step = smo_filter(self, 0, self->filter_step, MCL_FROM_FLOAT(target), MCL_FROM_FLOAT(0.001f));
     if (self->filter_step < MCL_FROM_FLOAT(minimum))
     {
         self->filter_step = MCL_FROM_FLOAT(minimum > 0.5f ? 0.5f : minimum);
     }
     kslf = self->filter_step;
-    self->e_alpha = MCL_ADD(self->e_alpha, MCL_MUL(kslf, MCL_SUB(z_a, self->e_alpha)));
-    self->e_beta = MCL_ADD(self->e_beta, MCL_MUL(kslf, MCL_SUB(z_b, self->e_beta)));
-    self->e_alpha_final = MCL_ADD(self->e_alpha_final,
-        MCL_MUL(kslf, MCL_SUB(self->e_alpha, self->e_alpha_final)));
-    self->e_beta_final = MCL_ADD(self->e_beta_final,
-        MCL_MUL(kslf, MCL_SUB(self->e_beta, self->e_beta_final)));
+    self->e_alpha = smo_filter(self, 1, self->e_alpha, z_a, kslf);
+    self->e_beta = smo_filter(self, 2, self->e_beta, z_b, kslf);
+    self->e_alpha_final = smo_filter(self, 3, self->e_alpha_final, self->e_alpha, kslf);
+    self->e_beta_final = smo_filter(self, 4, self->e_beta_final, self->e_beta, kslf);
 
     raw = smo_radians(mcl_math_atan2(MCL_NEG(self->e_alpha_final), self->e_beta_final));
     delta = raw - smo_radians(self->theta_prev);
@@ -183,8 +198,7 @@ static void smo_update(void *impl, mcl_scalar v_alpha, mcl_scalar v_beta,
     if (delta > MCL_PI / 3.0f) { delta = MCL_PI / 3.0f; }
     if (delta < -MCL_PI / 3.0f) { delta = -MCL_PI / 3.0f; }
     self->dtheta_prev = MCL_FROM_FLOAT(delta);
-    self->w_est = MCL_ADD(self->w_est,
-        MCL_MUL(MCL_FROM_FLOAT(0.02f), MCL_SUB(self->dtheta_prev, self->w_est)));
+    self->w_est = smo_filter(self, 5, self->w_est, self->dtheta_prev, MCL_FROM_FLOAT(0.02f));
 
     /* With E fed back in the predictor, the ideal sliding transfer is
      * Efinal/Etrue = H^2/(1+H), not H^2. In the continuous approximation,
@@ -207,6 +221,9 @@ static void smo_seed(void *impl, mcl_scalar flux_alpha, mcl_scalar flux_beta)
     mcl_observer_smo *self = (mcl_observer_smo *)impl;
     float omega, theta, magnitude, direction, angle;
     if (self == NULL) { return; }
+#if defined(MCL_USE_Q15)
+    { int n; for (n=0; n<6; ++n) { self->filter_remainder[n]=0; } }
+#endif
     omega = MCL_TO_FLOAT(self->seed_omega);
     direction = omega < 0.0f ? -1.0f : 1.0f;
     theta = smo_radians(mcl_math_atan2(flux_beta, flux_alpha));

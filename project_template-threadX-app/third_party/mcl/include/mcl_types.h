@@ -121,7 +121,7 @@ static inline int16_t mcl_q15_div(int16_t a, int16_t b)
     }
 
     /* Q15/Q15 = Q0，左移 15 位转回 Q15；|a|≤32768 时中间量不溢出 int32 */
-    t = ((int32_t)a << 15) / b;
+    t = ((int32_t)a * 32768) / b;
     return mcl_q15_sat(t);
 }
 
@@ -187,7 +187,7 @@ static inline int32_t mcl_q31_div(int32_t a, int32_t b)
     }
 
     /* Q31/Q31 = Q0，左移 31 位转回 Q31；用 int64 中间量防溢出 */
-    t = ((int64_t)a << 31) / b;
+    t = ((int64_t)a * INT64_C(2147483648)) / b;
     return mcl_q31_sat(t);
 }
 
@@ -204,6 +204,31 @@ static inline int32_t mcl_q31_div(int32_t a, int32_t b)
 #else
     #define MCL_FROM_FLOAT(x)  (x)
     #define MCL_TO_FLOAT(x)    (x)
+#endif
+
+/* Compile-time configuration constants (also valid in static initializers).
+ * value: physical value; base: positive physical normalization base.
+ * float keeps physical units; fixed modes encode value/base with saturation.
+ * Arguments must be constant expressions without side effects; runtime data
+ * should use MCL_FROM_FLOAT with the appropriate boundary conversion instead.
+ * double here is constant arithmetic, not a fixed-point ISR operation.
+ */
+#if defined(MCL_USE_Q15)
+    #define MCL_CONFIG_Q_CONST(x) \
+        ((x) >= 1.0 ? (mcl_scalar)32767 : \
+         (x) <= -1.0 ? (mcl_scalar)(-32767 - 1) : \
+         (mcl_scalar)((x) * 32768.0))
+    #define MCL_CONFIG_VALUE(value, base) \
+        MCL_CONFIG_Q_CONST((double)(value) / (double)(base))
+#elif defined(MCL_USE_Q31)
+    #define MCL_CONFIG_Q_CONST(x) \
+        ((x) >= 1.0 ? (mcl_scalar)2147483647 : \
+         (x) <= -1.0 ? (mcl_scalar)(-2147483647 - 1) : \
+         (mcl_scalar)((x) * 2147483648.0))
+    #define MCL_CONFIG_VALUE(value, base) \
+        MCL_CONFIG_Q_CONST((double)(value) / (double)(base))
+#else
+    #define MCL_CONFIG_VALUE(value, base) ((mcl_scalar)(value))
 #endif
 
 /* ---- 统一运算宏（float 直接运算，定点校正/饱和） ---- */
@@ -233,6 +258,57 @@ static inline int32_t mcl_q31_div(int32_t a, int32_t b)
     #define MCL_SAT(x)     (x)
     #define MCL_DIV(a, b)  ((a) / (b))
 #endif
+
+/* Runtime HAL boundaries: physical units in float, per-unit in fixed. */
+static inline mcl_scalar mcl_from_physical(float value, float base)
+{
+#if defined(MCL_USE_Q15) || defined(MCL_USE_Q31)
+    return MCL_FROM_FLOAT(value / base);
+#else
+    (void)base;
+    return value;
+#endif
+}
+
+static inline float mcl_to_physical(mcl_scalar value, float base)
+{
+#if defined(MCL_USE_Q15) || defined(MCL_USE_Q31)
+    return MCL_TO_FLOAT(value) * base;
+#else
+    (void)base;
+    return value;
+#endif
+}
+
+/* Saturate once AFTER the complete ratio, not at a/b before multiplying c. */
+static inline mcl_scalar mcl_mul_div(mcl_scalar a, mcl_scalar b, mcl_scalar d)
+{
+    if (d == 0) { return MCL_DIV(MCL_MUL(a, b), d); }
+#if defined(MCL_USE_Q15)
+    int64_t result = (int64_t)a * b / d;
+    if (result > 32767) { return 32767; }
+    if (result < -32768) { return -32768; }
+    return (mcl_scalar)result;
+#elif defined(MCL_USE_Q31)
+    return MCL_SAT((int64_t)a * b / d);
+#else
+    return a * b / d;
+#endif
+}
+
+static inline mcl_scalar mcl_mul_int(mcl_scalar value, uint32_t count)
+{
+#if defined(MCL_USE_Q15)
+    int64_t result = (int64_t)value * count;
+    if (result > 32767) { return 32767; }
+    if (result < -32768) { return -32768; }
+    return (mcl_scalar)result;
+#elif defined(MCL_USE_Q31)
+    return MCL_SAT((int64_t)value * count);
+#else
+    return value * (float)count;
+#endif
+}
 
 /* ============================ 运行模式 ============================ */
 

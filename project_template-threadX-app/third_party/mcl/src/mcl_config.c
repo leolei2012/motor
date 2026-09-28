@@ -5,6 +5,7 @@
 
 #include "mcl_config.h"
 #include <string.h>
+#include <math.h>
 
 void mcl_config_default(mcl_config *cfg)
 {
@@ -100,6 +101,18 @@ void mcl_config_default(mcl_config *cfg)
     cfg->pos_pid.i_max = MCL_FROM_FLOAT(500.0f);
 #endif
     cfg->speed_ramp_rpm_s = (mcl_scalar)0; /* 默认不斜坡，避免改变既有阶跃测试 */
+    cfg->avs_enabled = false;
+    cfg->speed_aw_time = (mcl_scalar)0; /* 保持库既有控制行为，宿主按需开启。 */
+#if !defined(MCL_USE_Q15) && !defined(MCL_USE_Q31)
+    cfg->avs_start_voltage = MCL_FROM_FLOAT(27.0f);
+    cfg->avs_stop_voltage = MCL_FROM_FLOAT(29.0f);
+    cfg->avs_speed_deadband = MCL_FROM_FLOAT(5.0f);
+#else
+    cfg->avs_start_voltage = MCL_FROM_FLOAT(0.85f);
+    cfg->avs_stop_voltage = MCL_FROM_FLOAT(0.90f);
+    cfg->avs_speed_deadband = MCL_FROM_FLOAT(0.01f);
+#endif
+    cfg->avs_recovery_time = MCL_FROM_FLOAT(0.05f); /* seconds in all modes */
 
     /* 反馈 */
     cfg->feedback.type = MCL_FEEDBACK_NONE;
@@ -122,14 +135,16 @@ void mcl_config_default(mcl_config *cfg)
        定点语义须随 time_base 归一化（见 mcl_config.h 注意事项 4），这里仅填占位值。 */
 #if defined(MCL_USE_Q15) || defined(MCL_USE_Q31)
     cfg->openloop_rpm = MCL_FROM_FLOAT(0.3f);          /* 0.3 pu 速度基值（占位） */
+    cfg->openloop_min_rpm = MCL_FROM_FLOAT(0.005f);
 #else
     cfg->openloop_rpm = MCL_FROM_FLOAT(200.0f);
+    cfg->openloop_min_rpm = MCL_FROM_FLOAT(15.0f);
 #endif
     cfg->openloop_rpm_low = (mcl_scalar)0;
-    cfg->openloop_hyst = MCL_FROM_FLOAT(0.1f);
-    cfg->openloop_time_lock = MCL_FROM_FLOAT(0.05f);
-    cfg->openloop_time_ramp = MCL_FROM_FLOAT(0.1f);
-    cfg->openloop_time = MCL_FROM_FLOAT(0.05f);
+    cfg->openloop_hyst = 0.1f;
+    cfg->openloop_time_lock = 0.05f;
+    cfg->openloop_time_ramp = 0.1f;
+    cfg->openloop_time = 0.05f;
     cfg->openloop_boost_q = (mcl_scalar)0;
     cfg->openloop_max_q = MCL_FROM_FLOAT(-1.0f);
 #if defined(MCL_USE_Q15) || defined(MCL_USE_Q31)
@@ -168,7 +183,7 @@ void mcl_config_default(mcl_config *cfg)
     cfg->limits.overspeed = MCL_FROM_FLOAT(0.8f);
     cfg->limits.underspeed = (mcl_scalar)0;
     cfg->limits.abs_overspeed = MCL_FROM_FLOAT(0.95f);
-    cfg->fault_stop_time = MCL_FROM_FLOAT(1.0f);           /* 占用 1.0 边界值，宿主须按需改小 */
+    cfg->fault_stop_time = 1.0f;           /* 物理秒，三种精度一致 */
 #else
     cfg->limits.enabled = MCL_PROTECT_ALL;
     cfg->limits.overcurrent = MCL_FROM_FLOAT(10.0f);
@@ -188,7 +203,7 @@ void mcl_config_default(mcl_config *cfg)
     cfg->limits.overspeed = MCL_FROM_FLOAT(800.0f);
     cfg->limits.underspeed = (mcl_scalar)0;
     cfg->limits.abs_overspeed = MCL_FROM_FLOAT(1100.0f);
-    cfg->fault_stop_time = MCL_FROM_FLOAT(1.0f);
+    cfg->fault_stop_time = 1.0f;
 #endif
 
     /* 校准 */
@@ -233,5 +248,48 @@ int mcl_config_validate(const mcl_config *cfg)
         return MCL_ERR_PARAM;
     }
 
+    if (!(MCL_TO_FLOAT(cfg->time_base) > 0.0f) || !isfinite(MCL_TO_FLOAT(cfg->time_base)))
+    {
+        return MCL_ERR_PARAM;
+    }
+    if (!isfinite(cfg->openloop_hyst) || cfg->openloop_hyst < 0.0f ||
+        !isfinite(cfg->openloop_time_lock) || cfg->openloop_time_lock < 0.0f ||
+        !isfinite(cfg->openloop_time_ramp) || cfg->openloop_time_ramp < 0.0f ||
+        !isfinite(cfg->openloop_time) || cfg->openloop_time < 0.0f ||
+        !isfinite(cfg->fault_stop_time) || cfg->fault_stop_time < 0.0f)
+    {
+        return MCL_ERR_PARAM;
+    }
+    if (!isfinite(MCL_TO_FLOAT(cfg->speed_aw_time)) || cfg->speed_aw_time < 0)
+    {
+        return MCL_ERR_PARAM;
+    }
+    if (cfg->avs_enabled)
+    {
+        if (!(cfg->avs_start_voltage > cfg->bus_voltage &&
+              cfg->avs_stop_voltage > cfg->avs_start_voltage &&
+              cfg->avs_stop_voltage < cfg->limits.overvoltage &&
+              cfg->avs_recovery_time > 0 && isfinite(MCL_TO_FLOAT(cfg->avs_recovery_time)) &&
+              cfg->speed_aw_time > 0 &&
+              cfg->avs_speed_deadband >= 0 && isfinite(MCL_TO_FLOAT(cfg->avs_speed_deadband)) &&
+              cfg->speed_pid.out_min <= 0.0f && cfg->speed_pid.out_max >= 0.0f &&
+              (cfg->limits.enabled & MCL_PROTECT_OVERVOLTAGE)))
+        {
+            return MCL_ERR_PARAM;
+        }
+    }
+#if defined(MCL_USE_Q15) || defined(MCL_USE_Q31)
+    {
+        float tick = 1.0f / ((float)cfg->current_loop_freq_hz * MCL_TO_FLOAT(cfg->time_base));
+        if (MCL_FROM_FLOAT(tick) == 0 || tick >= 1.0f ||
+            fabsf(MCL_TO_FLOAT(cfg->speed_pid.ki)) * tick * cfg->speed_loop_divider >= 1.0f ||
+            fabsf(MCL_TO_FLOAT(cfg->pos_pid.ki)) * tick * cfg->pos_loop_divider >= 1.0f)
+        {
+            return MCL_ERR_PARAM; /* normalized time must fit without saturation */
+        }
+        if (cfg->avs_enabled && MCL_FROM_FLOAT(1.0f / ((float)cfg->current_loop_freq_hz *
+            MCL_TO_FLOAT(cfg->avs_recovery_time))) == 0) { return MCL_ERR_PARAM; }
+    }
+#endif
     return MCL_OK;
 }

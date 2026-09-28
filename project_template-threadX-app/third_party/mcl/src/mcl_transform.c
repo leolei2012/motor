@@ -22,7 +22,13 @@ void mcl_transform_clarke(mcl_scalar ia, mcl_scalar ib, mcl_scalar ic,
 
     /* 幅值不变 Clarke：i_alpha = ia；i_beta = (ia + 2*ib) / sqrt(3) */
     *alpha = ia;
+#if defined(MCL_USE_Q15)
+    *beta = MCL_SAT(((int32_t)ia + 2 * (int32_t)ib) * (int64_t)MCL_ONE_BY_SQRT3 / 32768);
+#elif defined(MCL_USE_Q31)
+    *beta = MCL_SAT(((int64_t)ia + 2 * (int64_t)ib) * MCL_ONE_BY_SQRT3 / INT64_C(2147483648));
+#else
     *beta = MCL_MUL(MCL_ADD(ia, MCL_ADD(ib, ib)), MCL_ONE_BY_SQRT3);
+#endif
 }
 
 void mcl_transform_park(mcl_scalar alpha, mcl_scalar beta, mcl_scalar phase,

@@ -41,10 +41,15 @@ int mcl_cal_current_offset(const mcl_hal_ops *hal, void *ctx,
                                  uint32_t samples, mcl_scalar offset[3])
 {
     uint32_t i;
+#if defined(MCL_USE_Q15) || defined(MCL_USE_Q31)
+    /* Even UINT32_MAX full-scale samples fit in signed 64 bits. */
+    int64_t sum_a = 0, sum_b = 0, sum_c = 0;
+#else
     mcl_scalar sum_a = (mcl_scalar)0;
     mcl_scalar sum_b = (mcl_scalar)0;
     mcl_scalar sum_c = (mcl_scalar)0;
     mcl_scalar inv_n;
+#endif
 
     if (hal == NULL || hal->adc_read_phase == NULL || offset == NULL)
     {
@@ -57,7 +62,9 @@ int mcl_cal_current_offset(const mcl_hal_ops *hal, void *ctx,
 
     /* 增量平均：每个样本乘 1/n 再累加，结果即平均值。
        避免「先累加 n 次再除」导致的累加溢出，也避免除以整数 n>1 的定点问题。 */
+#if !defined(MCL_USE_Q15) && !defined(MCL_USE_Q31)
     inv_n = MCL_FROM_FLOAT(1.0f / (float)samples);
+#endif
 
     for (i = 0; i < samples; i++)
     {
@@ -68,14 +75,26 @@ int mcl_cal_current_offset(const mcl_hal_ops *hal, void *ctx,
         {
             return MCL_ERR_HAL;
         }
+#if defined(MCL_USE_Q15) || defined(MCL_USE_Q31)
+        sum_a += ia;
+        sum_b += ib;
+        sum_c += ic;
+#else
         sum_a = MCL_ADD(sum_a, MCL_MUL(ia, inv_n));
         sum_b = MCL_ADD(sum_b, MCL_MUL(ib, inv_n));
         sum_c = MCL_ADD(sum_c, MCL_MUL(ic, inv_n));
+#endif
     }
 
+#if defined(MCL_USE_Q15) || defined(MCL_USE_Q31)
+    offset[0] = (mcl_scalar)(sum_a / samples);
+    offset[1] = (mcl_scalar)(sum_b / samples);
+    offset[2] = (mcl_scalar)(sum_c / samples);
+#else
     offset[0] = sum_a;
     offset[1] = sum_b;
     offset[2] = sum_c;
+#endif
     return MCL_OK;
 }
 

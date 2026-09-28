@@ -65,6 +65,9 @@ void mcl_pll_reset(mcl_pll *self)
         return;
     }
 
+#if defined(MCL_USE_Q15)
+    self->phase_remainder = self->speed_remainder = 0;
+#endif
     self->phase = (mcl_scalar)0;
     self->speed = (mcl_scalar)0;
     self->last_phase = (mcl_scalar)0;
@@ -101,8 +104,15 @@ void mcl_pll_run(mcl_pll *self, mcl_scalar phase, mcl_scalar dt,
 #if defined(MCL_USE_Q15) || defined(MCL_USE_Q31)
     {
         mcl_scalar phase_rate = MCL_ADD(MCL_MUL(self->kp, err), self->speed);
+#if defined(MCL_USE_Q15)
+        int64_t product = (int64_t)phase_rate * dt * MCL_FROM_FLOAT(1.0f / 6.28318530718f) + self->phase_remainder;
+        int32_t increment = (int32_t)(product / 1073741824LL);
+        self->phase_remainder = product % 1073741824LL;
+        self->phase = mcl_pll_wrap(MCL_ADD(self->phase, (mcl_scalar)increment));
+#else
         self->phase = mcl_pll_wrap(MCL_ADD(self->phase,
             MCL_MUL(MCL_MUL(phase_rate, dt), MCL_FROM_FLOAT(1.0f / 6.28318530718f))));
+#endif
     }
 #else
     self->phase = mcl_pll_wrap(MCL_ADD(self->phase,
@@ -110,7 +120,19 @@ void mcl_pll_run(mcl_pll *self, mcl_scalar phase, mcl_scalar dt,
 #endif
 
     /* 速度积分：speed += ki·err·dt */
+#if defined(MCL_USE_Q15)
+    {
+        int64_t product = (int64_t)self->ki * err * dt + self->speed_remainder;
+        int32_t increment = (int32_t)(product / 1073741824LL);
+        int32_t next = (int32_t)self->speed + increment;
+        self->speed_remainder = product % 1073741824LL;
+        if (next > 32767) { next = 32767; self->speed_remainder = 0; }
+        if (next < -32768) { next = -32768; self->speed_remainder = 0; }
+        self->speed = (mcl_scalar)next;
+    }
+#else
     self->speed = MCL_ADD(self->speed, MCL_MUL(MCL_MUL(self->ki, err), dt));
+#endif
 
     /* PLL wind-up 保护（对齐 VESC mcpwm_foc.c foc_pll_run）。
        仅 float 启用。定点下 speed 由 MCL_ADD 自然饱和到 [0,1)，且「圈/dt_pu」与
@@ -157,6 +179,7 @@ void mcl_pll_run(mcl_pll *self, mcl_scalar phase, mcl_scalar dt,
     }
 #endif
 
+    self->last_phase = phase;
     if (phase_out != NULL)
     {
         *phase_out = self->phase;

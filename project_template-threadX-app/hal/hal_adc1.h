@@ -18,6 +18,7 @@ void hal_adc1_set_channel_sample_time(uint8_t channel, uint32_t sample_time);
  */
 void     hal_adc1_reg_trigger_channel(uint8_t channel);
 uint16_t hal_adc1_reg_read_result(void);
+bool     hal_adc1_reg_try_read(uint16_t *raw);
 
 /** ——— 注入组 (injected group) ——— */
 

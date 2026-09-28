@@ -123,6 +123,7 @@ void hal_adc1_set_channel_sample_time(uint8_t channel, uint32_t sample_time)
 
 void hal_adc1_reg_trigger_channel(uint8_t channel)
 {
+    if (LL_ADC_REG_IsConversionOngoing(ADC1) != 0u) { return; }
     LL_ADC_REG_SetSequencerRanks(ADC1, LL_ADC_REG_RANK_1,
                                  __LL_ADC_DECIMAL_NB_TO_CHANNEL(channel));
     LL_ADC_ClearFlag_EOC(ADC1);
@@ -137,6 +138,13 @@ uint16_t hal_adc1_reg_read_result(void)
     LL_ADC_ClearFlag_EOC(ADC1);
     LL_ADC_ClearFlag_OVR(ADC1);
     return raw;
+}
+
+bool hal_adc1_reg_try_read(uint16_t *raw)
+{
+    if (raw == NULL || LL_ADC_IsActiveFlag_EOC(ADC1) == 0u) { return false; }
+    *raw = hal_adc1_reg_read_result();
+    return true;
 }
 
 /** ============================================================

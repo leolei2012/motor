@@ -9,6 +9,26 @@
 
 本文档说明 mcl 的三种数值精度（`float` / `Q1.15` / `Q31`）如何选择、如何归一化、如何切换。
 
+配置常量可统一使用 `MCL_CONFIG_VALUE(物理值, 基值)`：
+
+```c
+cfg.phase_resistance = MCL_CONFIG_VALUE(0.475f, R_BASE);
+cfg.phase_inductance = MCL_CONFIG_VALUE(0.0008f, L_BASE);
+cfg.bus_voltage = MCL_CONFIG_VALUE(24.0f, V_BASE);
+cfg.avs_recovery_time = MCL_CONFIG_VALUE(0.05f, 1.0f);
+```
+
+float 模式保留物理值；Q15/Q31 模式计算 value/base 后按对应 Q 格式编码。
+不要把 `value/base` 合并成唯一参数，否则 float 也会被归一化。
+宏是 C 常量表达式，支持静态结构体初始化，不依赖优化器消除函数调用。
+参数必须是无副作用的常量表达式，base 必须为正；运行时采样数据使用边界转换函数。
+超范围常量会饱和，但饱和不表示配置合理，仍需选择满足物理关系的基值。
+AVS 恢复时间和速度回算时间在三种精度下都用物理秒，基值取 1；
+其他时间、角度和 PI 增益按对应字段的单位约定选择基值，不可一律使用同一个基值。
+当前板级配置见 `drivers/motor/include/drv_motor_config.h`，基值见 `drv_motor_units.h`。
+运行时输入使用 `mcl_from_physical(value, base)`，监控输出使用 `mcl_to_physical(value, base)`。
+频率、分频数、极对数、枚举和 bool 不使用转换宏。状态机计时字段为 float 秒，也不加宏。
+
 ---
 
 ## 1. 三种精度
@@ -180,7 +200,7 @@ float speed_rpm = MCL_TO_FLOAT(t.speed_rpm);   /* 若 speed 归一化则再乘�
 | 乘法结果偏差大 | 用了裸 `*` 没走 `MCL_MUL` | 核心运算统一用宏 |
 | 角度错乱 | 弧度/归一化角度混用 | 明确角度约定（§4） |
 | 精度不够 | Q15 只有 3e-5 | 改用 Q31 |
-| **时间阈值提前触发** | dt 归一化后（dt_pu=dt/T_BASE），`stall_time`/`fault_stop_time` 仍按物理秒数存，导致 50 步就超时（如堵转保护误关断 PWM） | 时间类阈值随 time_base 一起归一化：`T_pu = T/T_BASE = T·W_BASE` |
+| **时间阈值提前触发** | 状态机误用算法标幺 dt | 状态机使用 float 物理秒，见 §9.1 |
 | **基值 >1 溢出** | W_BASE/I_BASE/V_BASE 常 >1，直接 `MCL_FROM_FLOAT` 饱和 | 基值留在宿主 float 域；进定点用 `<1` 的倒数（如 `T_BASE=1/W_BASE`） |
 
 ---
@@ -199,7 +219,7 @@ float speed_rpm = MCL_TO_FLOAT(t.speed_rpm);   /* 若 speed 归一化则再乘�
 | MTPA / 弱磁 | ✅ | ✅（float 中转，避开 8/4/√3 常数溢出，三精度一致；IPMSM 支持） |
 | dt 归一化 | — | ✅（`cfg.time_base`，dt_pu = dt/T_BASE） |
 | 速度环 rpm↔rad/s 换算 | ✅ | ✅（归一化速度直接比较，rpm_pu == 电气速度_pu；`#if` 分离 float 物理路径） |
-| 时间阈值（stall_time 等）归一化 | — | ✅（一致性约定，见 §9.1；宿主需按 time_base 归一化配置阈值） |
+| 状态机计时 | float 秒 | float 秒，与标幺 dt 分开，见 §9.1 |
 
 > 定点数学层当前是「基础实现」（转 float 计算再转回），后续可优化为纯定点查表；
 > 详见 tests/fixed_point_test.c、fixed_point_observer_test.c、fixed_point_foc_test.c。
@@ -227,23 +247,18 @@ V_BASE = W_BASE · λ_BASE = R_BASE · I_BASE = L_BASE · W_BASE · I_BASE
 > 坑：基值本身（W_BASE、I_BASE、V_BASE）常 >1，**不能存进 Q15/Q31 的 `mcl_scalar`**。
 > 时间归一化用 `T_BASE = 1/W_BASE`（通常 <1，可存定点），`dt_pu = dt/T_BASE`。
 
-### 9.1 时间类阈值归一化
+### 9.1 算法时间与状态机计时分开
 
-dt 归一化后（`dt_pu = dt/T_BASE`，典型 dt_pu≈0.01 而非 0.0001），
-所有「以秒为单位、在算法里与 dt 比较/累加」的阈值也必须随 time_base 归一化，
-否则会提前 `1/T_BASE` 倍触发：
+电流环、观测器、PLL 使用 `dt_pu = dt/T_BASE`。`time_base` 的值为秒。
+速度/位置外环在初始化和更新配置时预计算离散积分增益，避免外环周期超过 Q1.x 范围。
 
-| 字段 | float（物理秒） | 定点（per-unit 时间） |
-|---|---|---|
-| `limits.stall_time` | 0.5 s | 0.5/T_BASE = 0.5·W_BASE |
-| `fault_stop_time` | 1.0 s | 1.0/T_BASE = 1.0·W_BASE |
+`openloop_hyst`、`openloop_time_lock`、`openloop_time_ramp`、`openloop_time`、
+`fault_stop_time` 的类型为 float，三种精度都直接填写物理秒，例如 `1.5f`。
+对应状态机计时器使用物理秒，不乘 W_BASE，不套 MCL_CONFIG_VALUE。
 
-> 典型踩坑：堵转保护。测试电机 speed=0（固定相位），若 `stall_time` 仍存物理 0.5 而
-> `dt_pu=0.01`，则 `stall_timer += dt_pu` 每步 +0.01，500 步就超 0.5（而非 5000 步），
-> 电机被误判堵转、PWM 被关断。
-
-> 规避：物理量仍用 float 存于配置时，在 `mcl_init` 里统一乘 time_base 归一化；
-> 或约定「配置里所有时间字段在定点模式下已是 per-unit 时间」。
+`avs_recovery_time`、`speed_aw_time` 仍为 mcl_scalar，采用基值 1 的物理秒编码，
+定点下范围为 [0,1)。速度斜坡采用 rpm/s 或 RPM_BASE/s，步长乘物理秒。
+这些约定改变了定点配置及结构体布局，库、驱动、应用必须使用同一精度宏全量重编译。
 
 ### 9.2 角度「圈」与速度「电气速度 pu」的换算（1/(2π)）
 

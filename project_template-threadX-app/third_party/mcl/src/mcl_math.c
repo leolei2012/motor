@@ -245,7 +245,7 @@ mcl_scalar mcl_math_cos(mcl_scalar x)
     /* cos(x) = sin(x + 0.25)（归一化角度 +90°）。
        纯整数 +90°：Q31/Q15 加 0.25（= 0x20000000 / 0x2000），负数不回卷由 mcl_q_sin 内部 mask 处理。 */
 #if defined(MCL_USE_Q31)
-    return mcl_q_sin((mcl_scalar)((int32_t)x + 0x20000000));
+    return mcl_q_sin((mcl_scalar)(((uint32_t)x + 0x20000000u) & 0x7FFFFFFFu));
 #elif defined(MCL_USE_Q15)
     return mcl_q_sin((mcl_scalar)((int16_t)x + 0x2000));
 #endif
@@ -256,7 +256,7 @@ void mcl_math_sincos(mcl_scalar x, mcl_scalar *sin, mcl_scalar *cos)
     if (!mcl_q_table_ready) { mcl_q_table_init(); }
     *sin = mcl_q_sin(x);
 #if defined(MCL_USE_Q31)
-    *cos = mcl_q_sin((mcl_scalar)((int32_t)x + 0x20000000));
+    *cos = mcl_q_sin((mcl_scalar)(((uint32_t)x + 0x20000000u) & 0x7FFFFFFFu));
 #elif defined(MCL_USE_Q15)
     *cos = mcl_q_sin((mcl_scalar)((int16_t)x + 0x2000));
 #endif

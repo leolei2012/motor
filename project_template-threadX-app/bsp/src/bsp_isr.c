@@ -13,6 +13,14 @@
 extern VOID _tx_timer_interrupt(VOID);
 
 volatile uint32_t g_tim6_isr_count = 0;
+/* Debug watch: cycles / (SystemCoreClock / 1000000) gives microseconds.
+   DWT is diagnostic only; never wait for it to advance. */
+volatile uint32_t g_motor_isr_cycles;
+volatile uint32_t g_motor_isr_max_cycles;
+volatile uint32_t g_motor_isr_overruns;
+volatile uint32_t g_motor_isr_budget_cycles;
+volatile uint32_t g_motor_isr_overrun_trip;
+static uint32_t s_motor_overrun_streak;
 
 /* ================================================================
  * 故障诊断捕获 (排查"跑飞"用)
@@ -187,7 +195,31 @@ void ADC1_2_IRQHandler(void)
         /* 电流环控制节拍：mcl FOC 算法 */
         if (g_drv.motor != NULL)
         {
+            uint32_t started;
+            uint32_t elapsed;
+            uint32_t frequency = g_drv.motor->motor.cfg.current_loop_freq_hz;
+            CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+            DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+            started = DWT->CYCCNT;
             drv_motor_control_isr(g_drv.motor);
+            elapsed = DWT->CYCCNT - started;
+            g_motor_isr_cycles = elapsed;
+            if (elapsed > g_motor_isr_max_cycles) { g_motor_isr_max_cycles = elapsed; }
+            g_motor_isr_budget_cycles = frequency ? SystemCoreClock / frequency : 0u;
+            if (g_motor_isr_budget_cycles && elapsed >= g_motor_isr_budget_cycles)
+            {
+                g_motor_isr_overruns++;
+                if (s_motor_overrun_streak < 3u) { s_motor_overrun_streak++; }
+                if (s_motor_overrun_streak == 3u && g_drv.motor->motor.state == MCL_STATE_RUN)
+                {
+                    /* Stop repeated late control updates from starving the RTOS.
+                       Separate latch distinguishes this from gate-driver faults. */
+                    g_motor_isr_overrun_trip++;
+                    LL_TIM_DisableAllOutputs(TIM1);
+                    mcl_fault_assert(&g_drv.motor->motor, MCL_FAULT_DRV);
+                }
+            }
+            else { s_motor_overrun_streak = 0u; }
         }
     }
     if (LL_ADC_IsActiveFlag_JEOS(ADC2) != 0U)

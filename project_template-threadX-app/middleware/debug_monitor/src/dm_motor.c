@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "drv_motor.h"
+#include "drv_motor_units.h"
 
 /**
  * dm_motor：mcl 全量可观测变量 → Modbus 保持寄存器（只读观测段 0x2000 起）。
@@ -119,42 +120,42 @@ static enum mb_err_t dm_motor_read_half(uint16_t addr, uint16_t *out)
         float value;
         switch (local)
         {
-        case 0x08: value = (float)m->speed_rad_s * 9.5492966f / (float)m->cfg.pole_pairs; break; /* speed_rpm */
-        case 0x09: value = (float)m->speed_rad_s * 9.5492966f / (float)m->cfg.pole_pairs; break;
-        case 0x0A: value = (float)m->phase_rad;           break;
-        case 0x0B: value = (float)m->phase_rad;           break;
-        case 0x0C: value = (float)m->iq_now;              break;
-        case 0x0D: value = (float)m->iq_now;              break;
-        case 0x0E: value = (float)m->id_now;              break;
-        case 0x0F: value = (float)m->id_now;              break;
-        case 0x10: value = (float)m->vbus;                break;
-        case 0x11: value = (float)m->vbus;                break;
+        case 0x08: value = mcl_to_physical(m->speed_rad_s, DRV_MOTOR_W_BASE) * 9.5492966f / (float)m->cfg.pole_pairs; break; /* speed_rpm */
+        case 0x09: value = mcl_to_physical(m->speed_rad_s, DRV_MOTOR_W_BASE) * 9.5492966f / (float)m->cfg.pole_pairs; break;
+        case 0x0A: value = mcl_to_physical(m->phase_rad, DRV_MOTOR_ANGLE_BASE);           break;
+        case 0x0B: value = mcl_to_physical(m->phase_rad, DRV_MOTOR_ANGLE_BASE);           break;
+        case 0x0C: value = mcl_to_physical(m->iq_now, DRV_MOTOR_I_BASE);              break;
+        case 0x0D: value = mcl_to_physical(m->iq_now, DRV_MOTOR_I_BASE);              break;
+        case 0x0E: value = mcl_to_physical(m->id_now, DRV_MOTOR_I_BASE);              break;
+        case 0x0F: value = mcl_to_physical(m->id_now, DRV_MOTOR_I_BASE);              break;
+        case 0x10: value = mcl_to_physical(m->vbus, DRV_MOTOR_V_BASE);                break;
+        case 0x11: value = mcl_to_physical(m->vbus, DRV_MOTOR_V_BASE);                break;
         case 0x12: value = dm->cap_post_lam;                 break; /* 复用：切换后观测器角 rad（原 ibus 恒 0） */
         case 0x13: value = dm->cap_post_lam;                 break;
-        case 0x14: value = (float)m->duty_now;            break;
-        case 0x15: value = (float)m->duty_now;            break;
+        case 0x14: value = mcl_to_physical(m->duty_now, 1.0f);            break;
+        case 0x15: value = mcl_to_physical(m->duty_now, 1.0f);            break;
         case 0x16: value = dm->cap_in_prev1;                 break; /* 复用：拖动倒数第二拍 PLL 输入角 rad */
         case 0x17: value = dm->cap_in_prev1;                 break;
         case 0x18: value = dm->cap_in_prev2;                 break; /* 复用：拖动倒数第三拍 PLL 输入角 rad */
         case 0x19: value = dm->cap_in_prev2;                 break;
-        case 0x1A: value = (float)m->phase_rad;           break; /* est_phase 观测器相位 */
-        case 0x1B: value = (float)m->phase_rad;           break;
-        case 0x1C: value = (float)m->speed_rad_s;         break; /* est_speed */
-        case 0x1D: value = (float)m->speed_rad_s;         break;
-        case 0x1E: value = (float)m->iq_ref;              break;
-        case 0x1F: value = (float)m->iq_ref;              break;
-        case 0x20: value = (float)m->speed_ref_rpm;       break;
-        case 0x21: value = (float)m->speed_ref_rpm;       break;
+        case 0x1A: value = mcl_to_physical(m->phase_rad, DRV_MOTOR_ANGLE_BASE);           break; /* est_phase 观测器相位 */
+        case 0x1B: value = mcl_to_physical(m->phase_rad, DRV_MOTOR_ANGLE_BASE);           break;
+        case 0x1C: value = mcl_to_physical(m->speed_rad_s, DRV_MOTOR_W_BASE);         break; /* est_speed */
+        case 0x1D: value = mcl_to_physical(m->speed_rad_s, DRV_MOTOR_W_BASE);         break;
+        case 0x1E: value = mcl_to_physical(m->iq_ref, DRV_MOTOR_I_BASE);              break;
+        case 0x1F: value = mcl_to_physical(m->iq_ref, DRV_MOTOR_I_BASE);              break;
+        case 0x20: value = mcl_to_physical(m->speed_ref_rpm, DRV_MOTOR_RPM_BASE);       break;
+        case 0x21: value = mcl_to_physical(m->speed_ref_rpm, DRV_MOTOR_RPM_BASE);       break;
         case 0x22: value = dm->cap_pre_est;                  break; /* 复用：切换前帧角 rad（原 openloop_mag） */
         case 0x23: value = dm->cap_pre_est;                  break;
         case 0x24: value = dm->cap_pre_lam;                  break; /* 复用：切换前观测器角 rad */
         case 0x25: value = dm->cap_pre_lam;                  break;
         case 0x26: value = dm->cap_post_est;                 break; /* 复用：切换后帧角 rad（原 openloop_angle） */
         case 0x27: value = dm->cap_post_est;                 break;
-        case 0x28: value = (float)m->v_alpha_prev;        break;
-        case 0x29: value = (float)m->v_alpha_prev;        break;
-        case 0x2A: value = (float)m->v_beta_prev;         break;
-        case 0x2B: value = (float)m->v_beta_prev;         break;
+        case 0x28: value = mcl_to_physical(m->v_alpha_prev, 1.0f);        break;
+        case 0x29: value = mcl_to_physical(m->v_alpha_prev, 1.0f);        break;
+        case 0x2A: value = mcl_to_physical(m->v_beta_prev, 1.0f);         break;
+        case 0x2B: value = mcl_to_physical(m->v_beta_prev, 1.0f);         break;
         case 0x2C: value = dm->ia_now;                     break; /* 复用：A 相电流 A（原 fault_current） */
         case 0x2D: value = dm->ia_now;                     break;
         case 0x2E: value = dm->ib_now;                     break; /* 复用：B 相电流 A（原 fault_voltage） */
@@ -164,16 +165,16 @@ static enum mb_err_t dm_motor_read_half(uint16_t addr, uint16_t *out)
         case 0x32: value = dm->cap_post_spd;                 break; /* 复用：切换后 PLL 速度 rad/s（原 fault_temp） */
         case 0x33: value = dm->cap_post_spd;                 break;
         /* ---- SMO 观测器内部状态（诊断：反电动势/估计电流） ---- */
-        case 0x36: value = (float)dm->observer.e_alpha_final; break; /* 反电动势 α（二级） */
-        case 0x37: value = (float)dm->observer.e_alpha_final; break;
-        case 0x38: value = (float)dm->observer.e_beta_final;  break; /* 反电动势 β（二级） */
-        case 0x39: value = (float)dm->observer.e_beta_final;  break;
-        case 0x3A: value = (float)dm->observer.w_est;         break; /* 估计角速度 ω·Ts */
-        case 0x3B: value = (float)dm->observer.w_est;         break;
-        case 0x3C: value = (float)dm->observer.i_alpha_hat;   break; /* 估计电流 α */
-        case 0x3D: value = (float)dm->observer.i_alpha_hat;   break;
-        case 0x3E: value = (float)dm->observer.i_beta_hat;    break; /* 估计电流 β */
-        case 0x3F: value = (float)dm->observer.i_beta_hat;    break;
+        case 0x36: value = mcl_to_physical(dm->observer.e_alpha_final, DRV_MOTOR_V_BASE); break; /* 反电动势 α（二级） */
+        case 0x37: value = mcl_to_physical(dm->observer.e_alpha_final, DRV_MOTOR_V_BASE); break;
+        case 0x38: value = mcl_to_physical(dm->observer.e_beta_final, DRV_MOTOR_V_BASE);  break; /* 反电动势 β（二级） */
+        case 0x39: value = mcl_to_physical(dm->observer.e_beta_final, DRV_MOTOR_V_BASE);  break;
+        case 0x3A: value = mcl_to_physical(dm->observer.w_est, 1.0f);         break; /* 估计角速度 ω·Ts */
+        case 0x3B: value = mcl_to_physical(dm->observer.w_est, 1.0f);         break;
+        case 0x3C: value = mcl_to_physical(dm->observer.i_alpha_hat, DRV_MOTOR_I_BASE);   break; /* 估计电流 α */
+        case 0x3D: value = mcl_to_physical(dm->observer.i_alpha_hat, DRV_MOTOR_I_BASE);   break;
+        case 0x3E: value = mcl_to_physical(dm->observer.i_beta_hat, DRV_MOTOR_I_BASE);    break; /* 估计电流 β */
+        case 0x3F: value = mcl_to_physical(dm->observer.i_beta_hat, DRV_MOTOR_I_BASE);    break;
         case 0x40: value = dm->r_meas;                       break; /* 启动实测相电阻 Ω */
         case 0x41: value = dm->r_meas;                       break;
         case 0x42: value = dm->l_meas;                       break; /* 启动实测相电感 H */

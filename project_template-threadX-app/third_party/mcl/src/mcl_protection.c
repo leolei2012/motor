@@ -5,6 +5,7 @@
 
 #include "mcl_protection.h"
 #include <string.h>
+#include <math.h>
 
 void mcl_protection_init(mcl_protection *self, const mcl_protection_limits *limits)
 {
@@ -13,8 +14,89 @@ void mcl_protection_init(mcl_protection *self, const mcl_protection_limits *limi
         return;
     }
 
+    memset(self, 0, sizeof(*self));
     self->limits = *limits;
-    memset(&self->status, 0, sizeof(self->status));
+}
+
+void mcl_protection_configure(mcl_protection *self,
+                             const mcl_protection_limits *limits, float recovery_time_s)
+{
+    if (self == NULL || limits == NULL || !isfinite(recovery_time_s) || recovery_time_s < 0.0f)
+    {
+        return;
+    }
+    self->limits = *limits;
+    self->recovery_time_s = recovery_time_s;
+}
+
+int mcl_protection_assert(mcl_protection *self, mcl_fault fault,
+                          const mcl_protection_sample *sample)
+{
+    if (self == NULL || sample == NULL || fault <= MCL_FAULT_NONE || fault > MCL_FAULT_ABS_OVERSPEED)
+    {
+        return MCL_ERR_PARAM;
+    }
+    if (self->fault == MCL_FAULT_NONE)
+    {
+        self->info.fault = fault;
+        self->info.current = sample->current;
+        self->info.voltage = sample->vbus;
+        self->info.speed = sample->speed;
+        self->info.temp = sample->temp;
+        self->info.tick = sample->tick;
+        self->recovery_elapsed_s = 0.0f;
+        self->fault = fault;
+    }
+    return MCL_OK;
+}
+
+mcl_fault mcl_protection_update(mcl_protection *self, const mcl_protection_sample *sample)
+{
+    mcl_fault detected;
+    if (self == NULL || sample == NULL) { return MCL_FAULT_NONE; }
+    if (self->fault != MCL_FAULT_NONE) { return self->fault; }
+    detected = mcl_protection_check(self, sample->ia, sample->ib, sample->ic,
+                                    sample->vbus, sample->temp, sample->speed, (mcl_scalar)0);
+    if (detected != MCL_FAULT_NONE)
+    {
+        (void)mcl_protection_assert(self, detected, sample);
+    }
+    return self->fault;
+}
+
+mcl_fault mcl_protection_get_fault(const mcl_protection *self)
+{
+    return self != NULL ? self->fault : MCL_FAULT_NONE;
+}
+
+int mcl_protection_get_fault_info(const mcl_protection *self, mcl_fault_info *out)
+{
+    if (self == NULL || out == NULL) { return MCL_ERR_PARAM; }
+    *out = self->info;
+    return MCL_OK;
+}
+
+void mcl_protection_clear(mcl_protection *self)
+{
+    if (self == NULL) { return; }
+    self->fault = MCL_FAULT_NONE;
+    self->recovery_elapsed_s = 0.0f;
+}
+
+bool mcl_protection_advance(mcl_protection *self, float dt_s)
+{
+    if (self == NULL || self->fault == MCL_FAULT_NONE || self->recovery_time_s <= 0.0f ||
+        !isfinite(dt_s) || dt_s <= 0.0f)
+    {
+        return false;
+    }
+    self->recovery_elapsed_s += dt_s;
+    if (self->recovery_elapsed_s >= self->recovery_time_s)
+    {
+        mcl_protection_clear(self);
+        return true;
+    }
+    return false;
 }
 
 void mcl_protection_set_status(mcl_protection *self, const mcl_protection_status *status)
@@ -29,6 +111,7 @@ void mcl_protection_set_status(mcl_protection *self, const mcl_protection_status
 mcl_fault mcl_protection_check(mcl_protection *self, mcl_scalar ia, mcl_scalar ib, mcl_scalar ic,
                                mcl_scalar vbus, mcl_scalar temp, mcl_scalar speed, mcl_scalar dt)
 {
+    (void)dt; /* Compatibility API; threshold checks are instantaneous. */
     if (self == NULL)
     {
         return MCL_FAULT_NONE;

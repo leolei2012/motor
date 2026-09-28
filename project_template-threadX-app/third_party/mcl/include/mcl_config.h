@@ -11,8 +11,8 @@
  *   mcl_config cfg;
  *   mcl_config_default(&cfg);
  *   cfg.pole_pairs = 7;                        // 只改需要改的
- *   cfg.phase_resistance = MCL_FROM_FLOAT(0.5f);
- *   cfg.rated_current = MCL_FROM_FLOAT(20.0f);
+ *   cfg.phase_resistance = MCL_CONFIG_VALUE(0.5f, R_BASE);
+ *   cfg.rated_current = MCL_CONFIG_VALUE(20.0f, I_BASE);
  *   mcl_init(&motor, &cfg, &hal, hal_ctx, obs_ops, obs_impl, obs_params);
  * @endcode
  *
@@ -26,10 +26,10 @@
  * 2. 【per-unit 归一化（定点必修）】定点下 base 必须满足物理约束（详见
  *    docs/spec/mcl_fixed_point.md §9）：
  *        V_BASE = W_BASE·λ_BASE = R_BASE·I_BASE = L_BASE·W_BASE·I_BASE
- *    - 电压类字段（bemf_const 之类）按 V_BASE 归一化；
+ *    - 电压按 V_BASE、bemf_const 磁链按 V_BASE/W_BASE 归一化；
  *    - 电流类字段按 I_BASE 归一化；
  *    - 电感类字段按 L_BASE 归一化；
- *    - 时间类字段按 T_BASE = 1/W_BASE 归一化。
+ *    - 算法 dt 按 T_BASE = 1/W_BASE 归一化；状态机计时使用 float 秒。
  *    基值本身常 >1，不能存进字段，只用于「配置时在 float 域换算」。
  *
  * 3. 【角度约定】float 模式用弧度；Q15/Q31 用归一化角度（1.0 = 2π = 一圈），
@@ -37,9 +37,9 @@
  *
  * 4. 【时间与 time_base】dt 归一化 dt_pu = dt/T_BASE = dt·W_BASE：
  *    - float：time_base 保持默认 1.0（不归一化，dt 为物理秒）。
- *    - 定点：time_base = 1/W_BASE，且「以秒为单位、与 dt 比较/累加」的阈值
- *      （限值里的 fault_stop_time、openloop_*_time）都要随
- *      time_base 一起归一化，否则会提前 1/T_BASE 倍触发（见 fixed_point.md §9.1）。
+ *    - 定点：time_base = 1/W_BASE，仅算法积分周期采用 dt_pu。
+ *      openloop_hyst、openloop_time*、fault_stop_time 在所有精度下均为 float 秒，
+ *      对应计时器每拍累加 1/current_loop_freq_hz，不做标幺转换。
  *
  * 5. 【PID 增益必须 <1（定点）】Q15/Q31 范围 [-1,1)，kp/ki 通常 <1；
  *    物理量下整定好的增益切定点后需按归一化量纲重新整定。
@@ -110,9 +110,20 @@ typedef struct
                                      定点下 kp/ki 须 <1（见注意事项 5）。 */
     mcl_pid_params speed_pid;   /**< 速度环 PID。输出是 iq 参考（电流），
                                      out_min/max 按电流幅值。 */
+    mcl_scalar speed_aw_time;  /**< 速度环回算时间，s。0 保持传统 PI；>0 启用
+                                    条件积分和回算，与 AVS 开关独立。三种精度均用物理秒，
+                                    定点不除 time_base（范围 0..1s）。 */
     mcl_scalar speed_ramp_rpm_s; /**< 速度指令斜坡，机械 rpm/s。0 = 不斜坡，
                                       速度环直接跟踪 speed_ref。 */
     mcl_pid_params pos_pid;     /**< 位置环 PID。输出是速度参考（rpm）。 */
+    /* ==================== AVS 母线限回馈 ====================
+       支持 float/Q15/Q31 FOC 闭环。定点电压除 V_BASE、速度除 W_BASE；
+       恢复时间保持物理秒，不除 time_base。AVS 不替代硬保护或能量吸收电路。 */
+    bool       avs_enabled;        /**< 显式开关，库默认关闭。 */
+    mcl_scalar avs_start_voltage;  /**< 开始限制回馈的母线电压 V / 电压标幺。 */
+    mcl_scalar avs_stop_voltage;   /**< 取消主动回馈电压 V / 标幺，须低于硬过压阈值。 */
+    mcl_scalar avs_recovery_time;  /**< 恢复制动力时间，三种精度均为物理秒，>0。 */
+    mcl_scalar avs_speed_deadband; /**< 方向死区，电气 rad/s / 速度标幺，>=0。 */
 
     /* ==================== 反馈 ==================== */
 
@@ -128,12 +139,13 @@ typedef struct
        仅无感模式（MCL_FEEDBACK_NONE + observer）使用；有感/裁剪 observer 时无效。 */
 
     mcl_scalar openloop_rpm;        /**< 开环拖动转速上限，机械 rpm。 */
+    mcl_scalar openloop_min_rpm;    /**< 启动转速下限，rpm / 速度标幺。 */
     mcl_scalar openloop_rpm_low;    /**< 最小电流时的开环转速比例 [0,1]（0=固定 openloop_rpm）。 */
-    mcl_scalar openloop_hyst;       /**< 估计速度低于开环阈值持续多久才进开环，s。
-                                          时间阈值，定点需随 time_base 归一化（注意事项 4）。 */
-    mcl_scalar openloop_time_lock;  /**< 开环序列锁定（id 对齐预定位）时间，s。 */
-    mcl_scalar openloop_time_ramp;  /**< 开环序列斜坡加速时间，s。 */
-    mcl_scalar openloop_time;       /**< 开环序列匀速保持时间，s。 */
+    float openloop_hyst;       /**< 估计速度低于开环阈值持续多久才进开环，s。
+                                          所有精度下均为物理秒，不随 time_base 归一化。 */
+    float openloop_time_lock;  /**< 开环序列锁定（id 对齐预定位）时间，s。 */
+    float openloop_time_ramp;  /**< 开环序列斜坡加速时间，s。 */
+    float openloop_time;       /**< 开环序列匀速保持时间，s。 */
     mcl_scalar openloop_boost_q;    /**< 开环 q 轴电流 boost，A（预留，自适应未启用）。 */
     mcl_scalar openloop_max_q;      /**< 开环 q 轴电流上限，A（<0 表示不限）。 */
     mcl_scalar openloop_drag_q;     /**< 开环拖动阶段 q 轴电流，A（I/F 固定拖动电流）。 */
@@ -145,8 +157,8 @@ typedef struct
 
     mcl_protection_limits limits; /**< 保护阈值与使能位（见 mcl_types.h MCL_PROTECT_*）。
                                       电流/电压/温度阈值按 float 物理量或 per-unit 归一化。 */
-    mcl_scalar fault_stop_time;   /**< 故障后自动恢复时间，s（0 = 手动清除，不自动恢复）。
-                                      时间阈值，定点需归一化（注意事项 4）。 */
+    float fault_stop_time;   /**< 故障后自动恢复时间，s（0 = 手动清除，不自动恢复）。
+                                      所有精度下均为物理秒，不随 time_base 归一化。 */
 
     /* ==================== 校准 ==================== */
 
