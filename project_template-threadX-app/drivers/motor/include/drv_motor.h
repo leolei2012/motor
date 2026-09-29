@@ -154,4 +154,8 @@ int drv_motor_measure_rl(struct drv_motor *self);
  */
 int drv_motor_get_telemetry(struct drv_motor *self, mcl_telemetry *out);
 
+/** Copy motor/SMO diagnostics together while excluding the control ISR. */
+int drv_motor_get_diagnostics(const struct drv_motor *self, mcl_diagnostics *motor,
+                              mcl_observer_smo_diagnostics *observer);
+
 #endif /* DRV_MOTOR_H */

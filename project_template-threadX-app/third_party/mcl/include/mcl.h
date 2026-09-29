@@ -113,6 +113,208 @@ typedef struct
     uint32_t tick_count;        /**< 控制周期计数（分频用） */
 } mcl;
 
+/* ============================ Single-value runtime getters ============================ */
+/* self must point to an initialized instance (not NULL).
+ * Return values retain their stored type and physical/per-unit basis.
+ * No snapshot allocation, unit conversion, or interrupt masking is performed.
+ * The host must serialize groups of reads with control_tick when consistency
+ * across fields is required. These accessors do not modify controller state. */
+static inline mcl_ctrl_mode mcl_get_ctrl_mode(const mcl *self)
+{
+    return self->ctrl_mode;
+}
+
+static inline mcl_scalar mcl_get_iq_ref(const mcl *self)
+{
+    return self->iq_ref;
+}
+
+static inline mcl_scalar mcl_get_speed_ref_rpm(const mcl *self)
+{
+    return self->speed_ref_rpm;
+}
+
+static inline mcl_scalar mcl_get_speed_ramp_rpm(const mcl *self)
+{
+    return self->speed_ramp_rpm;
+}
+
+static inline mcl_scalar mcl_get_pos_ref_rad(const mcl *self)
+{
+    return self->pos_ref_rad;
+}
+
+static inline mcl_scalar mcl_get_phase_rad(const mcl *self)
+{
+    return self->phase_rad;
+}
+
+static inline mcl_scalar mcl_get_speed_rad_s(const mcl *self)
+{
+    return self->speed_rad_s;
+}
+
+static inline mcl_scalar mcl_get_fb_speed_filt(const mcl *self)
+{
+    return self->fb_speed_filt;
+}
+
+static inline mcl_scalar mcl_get_vbus(const mcl *self)
+{
+    return self->vbus;
+}
+
+static inline mcl_scalar mcl_get_avs_scale(const mcl *self)
+{
+    return self->avs_scale;
+}
+
+static inline mcl_scalar mcl_get_avs_recovery_step(const mcl *self)
+{
+    return self->avs_recovery_step;
+}
+
+static inline mcl_scalar mcl_get_speed_aw_gain(const mcl *self)
+{
+    return self->speed_aw_gain;
+}
+
+static inline mcl_scalar mcl_get_iq_applied(const mcl *self)
+{
+    return self->iq_applied;
+}
+
+static inline mcl_scalar mcl_get_id_now(const mcl *self)
+{
+    return self->id_now;
+}
+
+static inline mcl_scalar mcl_get_id_cmd(const mcl *self)
+{
+    return self->id_cmd;
+}
+
+static inline mcl_scalar mcl_get_iq_now(const mcl *self)
+{
+    return self->iq_now;
+}
+
+static inline mcl_scalar mcl_get_duty_now(const mcl *self)
+{
+    return self->duty_now;
+}
+
+static inline mcl_scalar mcl_get_v_alpha_prev(const mcl *self)
+{
+    return self->v_alpha_prev;
+}
+
+static inline mcl_scalar mcl_get_v_beta_prev(const mcl *self)
+{
+    return self->v_beta_prev;
+}
+
+static inline mcl_scalar mcl_get_dt(const mcl *self)
+{
+    return self->dt;
+}
+
+static inline mcl_scalar mcl_get_openloop_speed(const mcl *self)
+{
+    return self->openloop_speed;
+}
+
+static inline mcl_scalar mcl_get_openloop_angle(const mcl *self)
+{
+    return self->openloop_angle;
+}
+
+static inline mcl_scalar mcl_get_openloop_phase(const mcl *self)
+{
+    return self->openloop_phase;
+}
+
+static inline mcl_scalar mcl_get_openloop_mag(const mcl *self)
+{
+    return self->openloop_mag;
+}
+
+static inline float mcl_get_ol_timer(const mcl *self)
+{
+    return self->ol_timer;
+}
+
+static inline float mcl_get_ol_hyst_timer(const mcl *self)
+{
+    return self->ol_hyst_timer;
+}
+
+static inline float mcl_get_ol_anchor_timer(const mcl *self)
+{
+    return self->ol_anchor_timer;
+}
+
+static inline mcl_scalar mcl_get_ol_speed(const mcl *self)
+{
+    return self->ol_speed;
+}
+
+static inline mcl_scalar mcl_get_ol_phase(const mcl *self)
+{
+    return self->ol_phase;
+}
+
+static inline float mcl_get_switch_blend_timer(const mcl *self)
+{
+    return self->switch_blend_timer;
+}
+
+static inline mcl_scalar mcl_get_switch_blend_iq0(const mcl *self)
+{
+    return self->switch_blend_iq0;
+}
+
+static inline mcl_scalar mcl_get_switch_phase_offset(const mcl *self)
+{
+    return self->switch_phase_offset;
+}
+
+static inline float mcl_get_ol_lock_timer(const mcl *self)
+{
+    return self->ol_lock_timer;
+}
+
+static inline float mcl_get_ol_wait_timer(const mcl *self)
+{
+    return self->ol_wait_timer;
+}
+
+static inline uint8_t mcl_get_ol_stage(const mcl *self)
+{
+    return self->ol_stage;
+}
+
+static inline uint8_t mcl_get_ol_started_once(const mcl *self)
+{
+    return self->ol_started_once;
+}
+
+static inline uint32_t mcl_get_tick_count(const mcl *self)
+{
+    return self->tick_count;
+}
+
+/* Previous PLL input; zero when observer support is compiled out. */
+static inline mcl_scalar mcl_get_pll_last_phase(const mcl *self)
+{
+#ifndef MCL_DISABLE_OBSERVER
+    return self->pll.last_phase;
+#else
+    (void)self;
+    return (mcl_scalar)0;
+#endif
+}
+
 /* ============================ 生命周期 ============================ */
 
 /**
@@ -143,9 +345,9 @@ void mcl_deinit(mcl *self);
 /**
  * @brief 运行时更新配置（仅可调参数）
  *
- * 只采纳可运行时调整的字段：PID 参数、保护阈值、fault_stop_time、max_duty。
+ * 采纳 PID、AVS、保护阈值、fault_stop_time、max_duty、速度斜坡及开环速度/拖动电流/seed 角。
  * 结构性字段（电机参数、频率、分频、反馈类型、校准零漂）运行时不更新，
- * 需重新 mcl_init 才能生效。
+ * 频率/反馈需重新 mcl_init；电机实体参数使用 mcl_set_motor_parameters。
  *
  * @param self 电机对象
  * @param cfg  新配置（只采纳可运行时调整的字段）
@@ -160,6 +362,37 @@ int mcl_set_config(mcl *self, const mcl_config *cfg);
  * @return MCL_OK / MCL_ERR_PARAM
  */
 int mcl_get_config(mcl *self, mcl_config *out);
+
+/* Host-owned value objects. Instances above are private implementation storage.
+ * Serialize setters/snapshots with control_tick; getters never expose internal pointers. */
+typedef struct
+{
+    mcl_scalar phase_resistance, phase_inductance, ld_lq_diff, bemf_const;
+} mcl_motor_parameters;
+
+typedef struct
+{
+    mcl_state state;
+    mcl_fault fault;
+    mcl_mode mode;
+    mcl_ctrl_mode ctrl_mode;
+    uint32_t tick_count;
+    uint8_t ol_stage;
+    uint32_t pole_pairs;
+    mcl_scalar phase_rad, speed_rad_s, iq_now, id_now, iq_ref, speed_ref_rpm;
+    mcl_scalar vbus, duty_now, v_alpha_prev, v_beta_prev, pll_last_phase;
+    mcl_scalar pos_ref_rad, openloop_mag, openloop_speed, openloop_angle;
+} mcl_diagnostics;
+
+int mcl_get_diagnostics(const mcl *self, mcl_diagnostics *out);
+int mcl_get_current_offsets(const mcl *self, mcl_scalar out[3]);
+int mcl_get_control_frequency(const mcl *self, uint32_t *out);
+int mcl_get_motor_parameters(const mcl *self, mcl_motor_parameters *out);
+/* IDLE only. Validate all fields before updating config, FOC/MTPA and SMO.
+ * Supports SMO or no observer; other observers return MCL_ERR_STATE. */
+int mcl_set_motor_parameters(mcl *self, const mcl_motor_parameters *params);
+int mcl_set_protection_status(mcl *self, const mcl_protection_status *status);
+int mcl_get_protection_status(const mcl *self, mcl_protection_status *out);
 
 /* ============================ 模式与启停 ============================ */
 

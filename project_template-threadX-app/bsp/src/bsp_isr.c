@@ -197,7 +197,9 @@ void ADC1_2_IRQHandler(void)
         {
             uint32_t started;
             uint32_t elapsed;
-            uint32_t frequency = g_drv.motor->motor.cfg.current_loop_freq_hz;
+            uint32_t frequency = 0u;
+            mcl_state motor_state;
+            (void)mcl_get_control_frequency(&g_drv.motor->motor, &frequency);
             CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
             DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
             started = DWT->CYCCNT;
@@ -210,7 +212,8 @@ void ADC1_2_IRQHandler(void)
             {
                 g_motor_isr_overruns++;
                 if (s_motor_overrun_streak < 3u) { s_motor_overrun_streak++; }
-                if (s_motor_overrun_streak == 3u && g_drv.motor->motor.state == MCL_STATE_RUN)
+                (void)mcl_get_state(&g_drv.motor->motor, &motor_state);
+                if (s_motor_overrun_streak == 3u && motor_state == MCL_STATE_RUN)
                 {
                     /* Stop repeated late control updates from starving the RTOS.
                        Separate latch distinguishes this from gate-driver faults. */

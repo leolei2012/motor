@@ -55,6 +55,16 @@ typedef struct
     mcl_scalar i_beta_last;         /**< 上一拍实测 iβ */
 } mcl_observer_smo;
 
+typedef struct
+{
+    mcl_scalar phase, e_alpha_final, e_beta_final, i_alpha_hat, i_beta_hat, w_est, z_alpha;
+} mcl_observer_smo_diagnostics;
+
+/* Call setters only while the observer is stopped; synchronize with update(). */
+int mcl_observer_smo_get_params(const mcl_observer_smo *self, mcl_observer_smo_params *out);
+int mcl_observer_smo_set_params(mcl_observer_smo *self, const mcl_observer_smo_params *params);
+int mcl_observer_smo_get_diagnostics(const mcl_observer_smo *self, mcl_observer_smo_diagnostics *out);
+
 /**
  * @brief 滑模观测器接口（注入 mcl_observer 载体用）
  */

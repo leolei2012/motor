@@ -15,6 +15,40 @@
 
 #ifndef MCL_DISABLE_OBSERVER
 
+int mcl_observer_smo_get_params(const mcl_observer_smo *self, mcl_observer_smo_params *out)
+{
+    if (self == NULL || out == NULL) { return MCL_ERR_PARAM; }
+    *out = self->params;
+    return MCL_OK;
+}
+
+int mcl_observer_smo_set_params(mcl_observer_smo *self, const mcl_observer_smo_params *params)
+{
+    if (self == NULL || params == NULL) { return MCL_ERR_PARAM; }
+    if (!(params->resistance >= 0 && params->inductance > 0 && params->ld >= 0 &&
+          params->ld <= params->inductance && params->flux > 0 && params->gain > 0 &&
+          params->boundary >= 0 && params->lpf >= 0) ||
+        !isfinite(MCL_TO_FLOAT(params->resistance)) || !isfinite(MCL_TO_FLOAT(params->inductance)) ||
+        !isfinite(MCL_TO_FLOAT(params->flux)) || !isfinite(MCL_TO_FLOAT(params->gain)) ||
+        !isfinite(MCL_TO_FLOAT(params->boundary)) || !isfinite(MCL_TO_FLOAT(params->lpf)))
+    { return MCL_ERR_PARAM; }
+    self->params = *params;
+    return MCL_OK;
+}
+
+int mcl_observer_smo_get_diagnostics(const mcl_observer_smo *self, mcl_observer_smo_diagnostics *out)
+{
+    if (self == NULL || out == NULL) { return MCL_ERR_PARAM; }
+    out->phase = self->phase;
+    out->e_alpha_final = self->e_alpha_final;
+    out->e_beta_final = self->e_beta_final;
+    out->i_alpha_hat = self->i_alpha_hat;
+    out->i_beta_hat = self->i_beta_hat;
+    out->w_est = self->w_est;
+    out->z_alpha = self->z_alpha;
+    return MCL_OK;
+}
+
 static void smo_reset(void *impl);
 
 static void smo_init(void *impl, const void *params)

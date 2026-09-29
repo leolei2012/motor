@@ -89,9 +89,11 @@ static int drv_motor_adc_read_phase(void *ctx, mcl_scalar *ia, mcl_scalar *ib, m
     /* 调试观测：保存减零漂后的三相电流（与 FOC 实际使用的一致） */
     if (self != NULL)
     {
-        self->ia_now = mcl_to_physical(MCL_SUB(*ia, self->motor.cfg.current_offset[0]), DRV_MOTOR_I_BASE);
-        self->ib_now = mcl_to_physical(MCL_SUB(*ib, self->motor.cfg.current_offset[1]), DRV_MOTOR_I_BASE);
-        self->ic_now = mcl_to_physical(MCL_SUB(*ic, self->motor.cfg.current_offset[2]), DRV_MOTOR_I_BASE);
+        mcl_scalar offsets[3];
+        (void)mcl_get_current_offsets(&self->motor, offsets);
+        self->ia_now = mcl_to_physical(MCL_SUB(*ia, offsets[0]), DRV_MOTOR_I_BASE);
+        self->ib_now = mcl_to_physical(MCL_SUB(*ib, offsets[1]), DRV_MOTOR_I_BASE);
+        self->ic_now = mcl_to_physical(MCL_SUB(*ic, offsets[2]), DRV_MOTOR_I_BASE);
     }
 
     return MCL_OK;
@@ -351,11 +353,6 @@ int drv_motor_set_openloop_if(struct drv_motor *self, float current, float speed
     return 0;
 }
 
-/** 与控制实际使用的 SMO 补偿角一致，不在驱动层重复固定角度补偿。 */
-static float drv_observer_output_angle(struct drv_motor *self)
-{
-    return mcl_to_physical(self->observer.phase, DRV_MOTOR_ANGLE_BASE);
-}
 /** 上一拍开环阶段（切换捕获用） */
 static uint8_t s_prev_ol_stage = 0u;
 
@@ -369,6 +366,7 @@ static uint32_t s_cap2_tick  = 0u;   /**< 本轮回合内拍数 */
 void drv_motor_control_isr(struct drv_motor *self)
 {
     uint8_t ol;
+    mcl_observer_smo_diagnostics obs;
 
     if (self == NULL)
     {
@@ -377,23 +375,24 @@ void drv_motor_control_isr(struct drv_motor *self)
 
     s_jeos_count++;
     mcl_control_tick(&self->motor);
+    (void)mcl_observer_smo_get_diagnostics(&self->observer, &obs);
 
     /* 切换瞬间事件捕获：拖动(2)→闭环(0) 的帧角/观测器角/速度，
        定位切闭环崩溃的相位跳变（一次性，cap_valid 置位后不再覆盖） */
-    ol = (uint8_t)self->motor.ol_stage;
+    ol = (uint8_t)mcl_get_ol_stage(&self->motor);
     if (ol == 2u)
     {
-        self->cap_pre_est = mcl_to_physical(self->motor.phase_rad, DRV_MOTOR_ANGLE_BASE);
-        self->cap_pre_lam = drv_observer_output_angle(self);
+        self->cap_pre_est = mcl_to_physical(mcl_get_phase_rad(&self->motor), DRV_MOTOR_ANGLE_BASE);
+        self->cap_pre_lam = mcl_to_physical(obs.phase, DRV_MOTOR_ANGLE_BASE);
         self->cap_in_prev2 = self->cap_in_prev1;
-        self->cap_in_prev1 = mcl_to_physical(self->motor.pll.last_phase, DRV_MOTOR_ANGLE_BASE);   /* = 本拍 seed 前观测器输出（PLL 输入） */
+        self->cap_in_prev1 = mcl_to_physical(mcl_get_pll_last_phase(&self->motor), DRV_MOTOR_ANGLE_BASE);   /* = 本拍 seed 前观测器输出（PLL 输入） */
     }
     else if (ol == 0u && s_prev_ol_stage == 2u && self->cap_valid == 0u)
     {
-        self->cap_post_est = mcl_to_physical(self->motor.phase_rad, DRV_MOTOR_ANGLE_BASE);
-        self->cap_post_lam = drv_observer_output_angle(self);
-        self->cap_post_spd = mcl_to_physical(self->motor.speed_rad_s, DRV_MOTOR_W_BASE);
-        self->cap_pll_last = mcl_to_physical(self->motor.pll.last_phase, DRV_MOTOR_ANGLE_BASE);
+        self->cap_post_est = mcl_to_physical(mcl_get_phase_rad(&self->motor), DRV_MOTOR_ANGLE_BASE);
+        self->cap_post_lam = mcl_to_physical(obs.phase, DRV_MOTOR_ANGLE_BASE);
+        self->cap_post_spd = mcl_to_physical(mcl_get_speed_rad_s(&self->motor), DRV_MOTOR_W_BASE);
+        self->cap_pll_last = mcl_to_physical(mcl_get_pll_last_phase(&self->motor), DRV_MOTOR_ANGLE_BASE);
         self->cap_valid = 1u;
     }
 
@@ -415,22 +414,22 @@ void drv_motor_control_isr(struct drv_motor *self)
             s_cap2_tick++;
             if (s_cap2_idx < 14u && s_cap2_tick == s_cap2_off[s_cap2_idx])
             {
-                self->cap2_frame[s_cap2_idx] = mcl_to_physical(self->motor.phase_rad, DRV_MOTOR_ANGLE_BASE);
+                self->cap2_frame[s_cap2_idx] = mcl_to_physical(mcl_get_phase_rad(&self->motor), DRV_MOTOR_ANGLE_BASE);
                 self->cap2_obs[s_cap2_idx]   = (float)self->ia_now;                  /* 复用：i_α A（实测） */
                 self->cap2_spd[s_cap2_idx]   = (float)((self->ia_now + 2.0f * self->ib_now) * 0.57735027f); /* 复用：i_β A（实测） */
-                self->cap2_va[s_cap2_idx]    = mcl_to_physical(self->observer.i_alpha_hat, DRV_MOTOR_I_BASE);   /* 复用：i_hat_α A（SMO 估计） */
-                self->cap2_vb[s_cap2_idx]    = mcl_to_physical(self->observer.i_beta_hat, DRV_MOTOR_I_BASE);    /* 复用：i_hat_β A */
-                self->cap2_x1[s_cap2_idx]    = mcl_to_physical(self->observer.e_alpha_final, DRV_MOTOR_V_BASE); /* SMO 反电动势 α */
-                self->cap2_x2[s_cap2_idx]    = mcl_to_physical(self->observer.e_beta_final, DRV_MOTOR_V_BASE); /* SMO 反电动势 β */
-                self->cap2_lam[s_cap2_idx]   = mcl_to_physical(self->observer.z_alpha, DRV_MOTOR_V_BASE);  /* 复用：SMO 滑模输出 z_α */
+                self->cap2_va[s_cap2_idx]    = mcl_to_physical(obs.i_alpha_hat, DRV_MOTOR_I_BASE);   /* 复用：i_hat_α A（SMO 估计） */
+                self->cap2_vb[s_cap2_idx]    = mcl_to_physical(obs.i_beta_hat, DRV_MOTOR_I_BASE);    /* 复用：i_hat_β A */
+                self->cap2_x1[s_cap2_idx]    = mcl_to_physical(obs.e_alpha_final, DRV_MOTOR_V_BASE); /* SMO 反电动势 α */
+                self->cap2_x2[s_cap2_idx]    = mcl_to_physical(obs.e_beta_final, DRV_MOTOR_V_BASE); /* SMO 反电动势 β */
+                self->cap2_lam[s_cap2_idx]   = mcl_to_physical(obs.z_alpha, DRV_MOTOR_V_BASE);  /* 复用：SMO 滑模输出 z_α */
                 s_cap2_idx++;
             }
-            if (mcl_to_physical(self->motor.speed_rad_s, DRV_MOTOR_W_BASE) < self->cap2_min_spd)
+            if (mcl_to_physical(mcl_get_speed_rad_s(&self->motor), DRV_MOTOR_W_BASE) < self->cap2_min_spd)
             {
-                self->cap2_min_spd = mcl_to_physical(self->motor.speed_rad_s, DRV_MOTOR_W_BASE);
+                self->cap2_min_spd = mcl_to_physical(mcl_get_speed_rad_s(&self->motor), DRV_MOTOR_W_BASE);
             }
             {
-                float aiq = mcl_to_physical(self->motor.iq_now, DRV_MOTOR_I_BASE);
+                float aiq = mcl_to_physical(mcl_get_iq_now(&self->motor), DRV_MOTOR_I_BASE);
                 if (aiq < 0.0f) { aiq = -aiq; }
                 if (aiq > self->cap2_max_iq) { self->cap2_max_iq = aiq; }
             }
@@ -519,7 +518,9 @@ static int drv_motor_read_ia(struct drv_motor *self, float *ia)
         return -1;
     }
 
-    a = MCL_SUB(a, self->motor.cfg.current_offset[0]);
+    mcl_scalar offsets[3];
+    (void)mcl_get_current_offsets(&self->motor, offsets);
+    a = MCL_SUB(a, offsets[0]);
     *ia = mcl_to_physical(a, DRV_MOTOR_I_BASE);
     return 0;
 }
@@ -545,7 +546,8 @@ int drv_motor_measure_rl(struct drv_motor *self)
     {
         return -1;
     }
-    if (self->motor.state == MCL_STATE_RUN)
+    mcl_state state;
+    if (mcl_get_state(&self->motor, &state) != MCL_OK || state != MCL_STATE_IDLE)
     {
         return -1;   /* 控制节拍会抢占 PWM 输出，禁止测量 */
     }
@@ -674,13 +676,11 @@ int drv_motor_measure_rl(struct drv_motor *self)
     l_meas = 0.8e-3f;
     r_meas = 0.475f;
 
-    self->observer.params.resistance = mcl_from_physical(r_meas, DRV_MOTOR_R_BASE);
-    self->observer.params.inductance = mcl_from_physical(l_meas, DRV_MOTOR_L_BASE);
-    self->observer.params.ld = MCL_SUB(mcl_from_physical(l_meas, DRV_MOTOR_L_BASE), self->motor.cfg.ld_lq_diff);
-    self->motor.cfg.phase_resistance = mcl_from_physical(r_meas, DRV_MOTOR_R_BASE);
-    self->motor.cfg.phase_inductance = mcl_from_physical(l_meas, DRV_MOTOR_L_BASE);
-    self->motor.foc.mtpa_fw.lq = mcl_from_physical(l_meas, DRV_MOTOR_L_BASE);
-    self->motor.foc.mtpa_fw.ld = MCL_SUB(mcl_from_physical(l_meas, DRV_MOTOR_L_BASE), self->motor.cfg.ld_lq_diff);
+    mcl_motor_parameters params;
+    if (mcl_get_motor_parameters(&self->motor, &params) != MCL_OK) { return -1; }
+    params.phase_resistance = mcl_from_physical(r_meas, DRV_MOTOR_R_BASE);
+    params.phase_inductance = mcl_from_physical(l_meas, DRV_MOTOR_L_BASE);
+    if (mcl_set_motor_parameters(&self->motor, &params) != MCL_OK) { return -1; }
 
     return 0;
 }
@@ -698,4 +698,21 @@ int drv_motor_get_telemetry(struct drv_motor *self, mcl_telemetry *out)
     }
 
     return 0;
+}
+
+int drv_motor_get_diagnostics(const struct drv_motor *self, mcl_diagnostics *motor,
+                              mcl_observer_smo_diagnostics *observer)
+{
+    uint32_t irq_mask;
+    int result;
+    if (self == NULL || motor == NULL || observer == NULL) { return -1; }
+    irq_mask = __get_PRIMASK();
+    __disable_irq();
+    result = mcl_get_diagnostics(&self->motor, motor);
+    if (result == MCL_OK)
+    {
+        result = mcl_observer_smo_get_diagnostics(&self->observer, observer);
+    }
+    __set_PRIMASK(irq_mask);
+    return result == MCL_OK ? 0 : -1;
 }

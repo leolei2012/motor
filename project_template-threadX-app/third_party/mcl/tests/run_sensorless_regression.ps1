@@ -39,6 +39,11 @@ $driverInclude = Join-Path $mclRoot '../../drivers/motor/include'
 foreach ($precision in @('FLOAT', 'MCL_USE_Q15', 'MCL_USE_Q31')) {
     $defines = @()
     if ($precision -ne 'FLOAT') { $defines = @("-D$precision") }
+    $apiExe = Join-Path $env:TEMP "host_api_$precision.exe"
+    & gcc -std=c99 -O2 -Wall -Wextra @defines "-I$(Join-Path $mclRoot 'include')" "-I$driverInclude" (Join-Path $PSScriptRoot 'host_api_test.c') @sources -lm -o $apiExe
+    if ($LASTEXITCODE -ne 0) { throw "Compilation failed: $precision host API" }
+    & $apiExe
+    if ($LASTEXITCODE -ne 0) { throw "Regression failed: $precision host API" }
     $testExe = Join-Path $env:TEMP "board_precision_$precision.exe"
     & gcc -std=c99 -O2 -Wall -Wextra @defines "-I$(Join-Path $mclRoot 'include')" "-I$driverInclude" (Join-Path $PSScriptRoot 'board_precision_test.c') @sources -lm -o $testExe
     if ($LASTEXITCODE -ne 0) { throw "Compilation failed: $precision board model" }

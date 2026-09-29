@@ -112,6 +112,8 @@ void pwm_isr(void)
 
 | 文档 | 内容 |
 |---|---|
+| [模块变量与参数汇总](docs/mcl_parameter_reference.md) | 参数含义、单位、库/板级默认值、三精度基值、setter/getter、生效时机及完整结构体索引 |
+| [宿主访问接口](docs/host_api.md) | 参数更新、诊断快照与并发访问约定 |
 | `docs/mcl_user_guide.md` | **使用指南**：集成、HAL、配置、观测器选型、保护、校准、FAQ |
 | `docs/spec/mcl_spec.md` | 规格书：定位、功能需求、API、性能指标 |
 | `docs/spec/mcl_architecture.md` | 代码架构设计：分层、模块 DAG、对象模型 |

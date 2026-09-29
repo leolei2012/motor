@@ -976,6 +976,108 @@ int mcl_get_config(mcl *self, mcl_config *out)
     return MCL_OK;
 }
 
+int mcl_get_diagnostics(const mcl *self, mcl_diagnostics *out)
+{
+    if (self == NULL || out == NULL) { return MCL_ERR_PARAM; }
+    out->state = self->state;
+    out->mode = self->mode;
+    out->ctrl_mode = self->ctrl_mode;
+    out->tick_count = self->tick_count;
+    out->ol_stage = self->ol_stage;
+    out->phase_rad = self->phase_rad;
+    out->speed_rad_s = self->speed_rad_s;
+    out->iq_now = self->iq_now;
+    out->id_now = self->id_now;
+    out->iq_ref = self->iq_ref;
+    out->speed_ref_rpm = self->speed_ref_rpm;
+    out->vbus = self->vbus;
+    out->duty_now = self->duty_now;
+    out->v_alpha_prev = self->v_alpha_prev;
+    out->v_beta_prev = self->v_beta_prev;
+    out->pos_ref_rad = self->pos_ref_rad;
+    out->openloop_mag = self->openloop_mag;
+    out->openloop_speed = self->openloop_speed;
+    out->openloop_angle = self->openloop_angle;
+    out->fault = mcl_protection_get_fault(&self->protection);
+    out->pole_pairs = self->cfg.pole_pairs;
+#ifndef MCL_DISABLE_OBSERVER
+    out->pll_last_phase = self->pll.last_phase;
+#else
+    out->pll_last_phase = 0;
+#endif
+    return MCL_OK;
+}
+
+int mcl_get_current_offsets(const mcl *self, mcl_scalar out[3])
+{
+    if (self == NULL || out == NULL) { return MCL_ERR_PARAM; }
+    memcpy(out, self->cfg.current_offset, sizeof(self->cfg.current_offset));
+    return MCL_OK;
+}
+
+int mcl_get_control_frequency(const mcl *self, uint32_t *out)
+{
+    if (self == NULL || out == NULL) { return MCL_ERR_PARAM; }
+    *out = self->cfg.current_loop_freq_hz;
+    return MCL_OK;
+}
+
+int mcl_get_motor_parameters(const mcl *self, mcl_motor_parameters *out)
+{
+    if (self == NULL || out == NULL) { return MCL_ERR_PARAM; }
+    out->phase_resistance = self->cfg.phase_resistance;
+    out->phase_inductance = self->cfg.phase_inductance;
+    out->ld_lq_diff = self->cfg.ld_lq_diff;
+    out->bemf_const = self->cfg.bemf_const;
+    return MCL_OK;
+}
+
+int mcl_set_motor_parameters(mcl *self, const mcl_motor_parameters *params)
+{
+    if (self == NULL || params == NULL) { return MCL_ERR_PARAM; }
+    if (self->state != MCL_STATE_IDLE || self->hal == NULL) { return MCL_ERR_STATE; }
+    if (!(params->phase_resistance > 0 && params->phase_inductance > 0 &&
+          params->ld_lq_diff >= 0 && params->ld_lq_diff < params->phase_inductance && params->bemf_const > 0) ||
+        !isfinite(MCL_TO_FLOAT(params->phase_resistance)) ||
+        !isfinite(MCL_TO_FLOAT(params->phase_inductance)) || !isfinite(MCL_TO_FLOAT(params->bemf_const)))
+    { return MCL_ERR_PARAM; }
+#ifndef MCL_DISABLE_OBSERVER
+    if (self->observer.ops != NULL)
+    {
+        mcl_observer_smo_params observer_params;
+        if (self->observer.ops != &mcl_observer_smo_ops || self->observer.impl == NULL) { return MCL_ERR_STATE; }
+        mcl_observer_smo_get_params(self->observer.impl, &observer_params);
+        observer_params.resistance = params->phase_resistance;
+        observer_params.inductance = params->phase_inductance;
+        observer_params.ld = MCL_SUB(params->phase_inductance, params->ld_lq_diff);
+        observer_params.flux = params->bemf_const;
+        if (mcl_observer_smo_set_params(self->observer.impl, &observer_params) != MCL_OK) { return MCL_ERR_PARAM; }
+    }
+#endif
+    self->cfg.phase_resistance = params->phase_resistance;
+    self->cfg.phase_inductance = params->phase_inductance;
+    self->cfg.ld_lq_diff = params->ld_lq_diff;
+    self->cfg.bemf_const = params->bemf_const;
+    mcl_foc_init(&self->foc, &self->cfg);
+    mcl_mtpa_fw_init(&self->mtpa_fw, MCL_SUB(params->phase_inductance, params->ld_lq_diff),
+                     params->phase_inductance, params->bemf_const, self->cfg.rated_current);
+    return MCL_OK;
+}
+
+int mcl_set_protection_status(mcl *self, const mcl_protection_status *status)
+{
+    if (self == NULL || status == NULL) { return MCL_ERR_PARAM; }
+    mcl_protection_set_status(&self->protection, status);
+    return MCL_OK;
+}
+
+int mcl_get_protection_status(const mcl *self, mcl_protection_status *out)
+{
+    if (self == NULL || out == NULL) { return MCL_ERR_PARAM; }
+    *out = self->protection.status;
+    return MCL_OK;
+}
+
 /* ============================ 模式与启停 ============================ */
 
 int mcl_set_mode(mcl *self, mcl_mode mode)

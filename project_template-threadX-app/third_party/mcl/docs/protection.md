@@ -31,7 +31,7 @@
 门面 `mcl_get_fault()`、`mcl_get_fault_info()`、`mcl_fault_assert()`、`mcl_clear_fault()` 保持不变。
 `motor.fault` 保留为只读兼容镜像，禁止直接赋值来清故障。
 原 `motor.fault_info` / `motor.fault_timer` 已迁移为 `motor.protection.info` /
-`motor.protection.recovery_elapsed_s`，推荐使用查询接口。结构体布局改变，需要全量重编译。
+`motor.protection.recovery_elapsed_s`（库内部）。宿主必须使用查询接口，不直接访问这些字段。结构体布局改变，需要全量重编译。
 
 ## 行为约定
 
@@ -57,3 +57,5 @@
 - 集成故障测试：PWM 置零、重复上报、故障禁止启动、自动回 IDLE、手动清除、外部输入保留。
 - 现有无感启动、AVS、保护及三精度板级模型回归通过。
 - 当前 float + O0 整板全量编译：0 errors / 0 warnings。未烧录验证。
+
+宿主外部保护输入使用 mcl_set_protection_status / mcl_get_protection_status；完整约定见 host_api.md。
