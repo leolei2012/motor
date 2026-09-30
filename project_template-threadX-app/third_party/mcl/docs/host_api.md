@@ -14,10 +14,10 @@ getter 返回值拷贝，不返回内部可写指针。
 | SMO 参数 | `mcl_observer_smo_set_params`（停止更新时） | `mcl_observer_smo_get_params` |
 | 外部保护输入 | `mcl_set_protection_status` | `mcl_get_protection_status` |
 | 电流零偏 | `mcl_calibrate_offset` | `mcl_get_current_offsets` |
-| 电流/速度/位置及开环指令 | 既有 `mcl_set_current/speed/position/openloop_*` | `mcl_get_diagnostics` 返回指令及开环状态 |
+| 电流/速度/位置及开环指令 | 既有 `mcl_set_current/speed/position/openloop_*` | 各字段的 `mcl_get_<字段名>()` |
 | 运行状态/故障 | 启停、上报、清除 API | `mcl_get_state/fault/fault_info` |
 | 控制频率 | 初始化配置（重新初始化才改变） | `mcl_get_control_frequency` |
-| 遥测/诊断 | 由算法产生，无宿主 setter | `mcl_get_telemetry/diagnostics` |
+| 遥测/诊断 | 由算法产生，无宿主 setter | `mcl_get_telemetry` 和单值 getter |
 | SMO 诊断 | 由观测器产生，无宿主 setter | `mcl_observer_smo_get_diagnostics` |
 
 示例：
@@ -38,8 +38,8 @@ SMO 独立 setter 适合观测器单独使用或调节滑模增益等参数；�
 应通过电机参数 setter 同步全部控制模块。
 
 通用库不依赖 MCU 中断指令。宿主必须将 setter、批量 getter 与控制更新串行化。
-本工程 Modbus 读取通过 `drv_motor_get_diagnostics` 在短临界区复制 MCL/SMO 诊断，
-离开临界区后再进行单位换算。单次副本一致，但不同 Modbus 半字回调之间没有整帧锁存保证。
+本工程 Modbus 按寄存器使用单值 getter 读取电机状态，并进行单位换算。
+SMO 保留独立诊断接口；没有跨变量或跨 Modbus 半字的同周期快照保证。
 ADC 控制 ISR 内直接调用库 getter；R/L 回填发生在 IDLE，控制环未运行时。
 
 已迁移电机驱动、监控、BSP 中断诊断的 MCL/SMO 内部字段访问。
@@ -59,7 +59,7 @@ mcl_ctrl_mode mode = mcl_get_ctrl_mode(&motor);
 
 这些 getter 的前置条件是实例已初始化且指针非 NULL；不分配快照、不做单位转换、不屏蔽中断。定点返回值仍为对应标幺数值，计时器仍为 float 秒。需要同一周期的多个值时由宿主统一保护读取区间。
 
-接口采用 static inline，编译器可内联；O0 下仍可能产生函数调用，因此不能保证比一次批量读取全部字段更快。按需读少量字段可避免复制整份快照。原有 `mcl_get_diagnostics()` 保留兼容已有监控调用；高频控制 ISR 已改为逐变量 getter。
+接口采用 static inline，编译器可内联；O0 下仍可能产生函数调用，因此不能保证比一次批量读取全部字段更快。按需读少量字段可避免复制整份快照。电机批量诊断接口已移除，监控和高频控制 ISR 均使用逐变量 getter。
 
 | getter | 返回类型 |
 |---|---|
@@ -102,3 +102,5 @@ mcl_ctrl_mode mode = mcl_get_ctrl_mode(&motor);
 | `mcl_get_tick_count()` | `uint32_t` |
 
 另提供 `mcl_get_pll_last_phase()`，返回前拍 PLL 输入角；裁剪观测器时返回零。
+
+`mcl_get_mode()` 返回运行模式，`mcl_get_pole_pairs()` 返回极对数；两者同样要求非 NULL 的已初始化实例。

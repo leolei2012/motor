@@ -8,7 +8,7 @@
 /**
  * dm_motor：mcl 全量可观测变量 → Modbus 保持寄存器（只读观测段 0x2000 起）。
  *
- * 通过驱动 getter 读取 MCL/SMO 诊断副本，不访问算法实例的内部字段。
+ * 通过 getter 按需读取 MCL 状态和 SMO 诊断，不访问算法实例的内部字段。
  * on_read 回调按绝对地址分派到具体变量，动态取最新值。
  *
  * 布局（从 DM_MOTOR_REG_BASE=0x2000 起）：
@@ -84,11 +84,11 @@ static enum mb_err_t dm_motor_read_half(uint16_t addr, uint16_t *out)
         return MB_ERR_ADDR;
     }
 
-    /* Read host-owned diagnostic snapshots through the public API. */
+    /* Read motor values individually through the public API. */
     const struct drv_motor *dm = s_motor;
-    mcl_diagnostics snapshot;
     mcl_observer_smo_diagnostics observer_snapshot;
-    const mcl_diagnostics *m = &snapshot;
+    mcl_state state;
+    mcl_fault fault;
 
     /* 0x2050 起为切换后逐拍采集段 */
     if (local >= 0x50u)
@@ -96,7 +96,8 @@ static enum mb_err_t dm_motor_read_half(uint16_t addr, uint16_t *out)
         return dm_motor_read_cap2(local, out);
     }
 
-    if (drv_motor_get_diagnostics(dm, &snapshot, &observer_snapshot) != 0)
+    if (local >= 0x36u && local <= 0x3Fu &&
+        mcl_observer_smo_get_diagnostics(&dm->observer, &observer_snapshot) != MCL_OK)
     {
         return MB_ERR_ADDR;
     }
@@ -104,14 +105,14 @@ static enum mb_err_t dm_motor_read_half(uint16_t addr, uint16_t *out)
     /* ---- 整数段（uint16 枚举，1 寄存器） ---- */
     switch (local)
     {
-    case 0x00: *out = (uint16_t)m->state;     return MB_OK;
-    case 0x01: *out = (uint16_t)m->fault;     return MB_OK;
-    case 0x02: *out = (uint16_t)m->ctrl_mode; return MB_OK;
-    case 0x03: *out = (uint16_t)m->mode;      return MB_OK;
-    case 0x04: *out = (uint16_t)m->ol_stage;  return MB_OK;
+    case 0x00: (void)mcl_get_state(&dm->motor, &state); *out = (uint16_t)state;     return MB_OK;
+    case 0x01: (void)mcl_get_fault(&dm->motor, &fault); *out = (uint16_t)fault;     return MB_OK;
+    case 0x02: *out = (uint16_t)mcl_get_ctrl_mode(&dm->motor); return MB_OK;
+    case 0x03: *out = (uint16_t)mcl_get_mode(&dm->motor);      return MB_OK;
+    case 0x04: *out = (uint16_t)mcl_get_ol_stage(&dm->motor);  return MB_OK;
     /* tick_count uint32：高字在前 */
-    case 0x05: *out = (uint16_t)((m->tick_count >> 16u) & 0xFFFFu); return MB_OK;
-    case 0x06: *out = (uint16_t)(m->tick_count & 0xFFFFu);          return MB_OK;
+    case 0x05: *out = (uint16_t)((mcl_get_tick_count(&dm->motor) >> 16u) & 0xFFFFu); return MB_OK;
+    case 0x06: *out = (uint16_t)(mcl_get_tick_count(&dm->motor) & 0xFFFFu);          return MB_OK;
     /* 0x07：启动进度/切换捕获标志（1=使能驱动 2=TIM1 3=零漂校准 4=MOE 5=R/L
        实测 6=已 start；128+1=切换已捕获），替代原对齐填充 0 */
     case 0x07: *out = (uint16_t)(dm->start_step | (dm->cap_valid ? 0x80u : 0u)); return MB_OK;
@@ -127,42 +128,42 @@ static enum mb_err_t dm_motor_read_half(uint16_t addr, uint16_t *out)
         float value;
         switch (local)
         {
-        case 0x08: value = mcl_to_physical(m->speed_rad_s, DRV_MOTOR_W_BASE) * 9.5492966f / (float)m->pole_pairs; break; /* speed_rpm */
-        case 0x09: value = mcl_to_physical(m->speed_rad_s, DRV_MOTOR_W_BASE) * 9.5492966f / (float)m->pole_pairs; break;
-        case 0x0A: value = mcl_to_physical(m->phase_rad, DRV_MOTOR_ANGLE_BASE);           break;
-        case 0x0B: value = mcl_to_physical(m->phase_rad, DRV_MOTOR_ANGLE_BASE);           break;
-        case 0x0C: value = mcl_to_physical(m->iq_now, DRV_MOTOR_I_BASE);              break;
-        case 0x0D: value = mcl_to_physical(m->iq_now, DRV_MOTOR_I_BASE);              break;
-        case 0x0E: value = mcl_to_physical(m->id_now, DRV_MOTOR_I_BASE);              break;
-        case 0x0F: value = mcl_to_physical(m->id_now, DRV_MOTOR_I_BASE);              break;
-        case 0x10: value = mcl_to_physical(m->vbus, DRV_MOTOR_V_BASE);                break;
-        case 0x11: value = mcl_to_physical(m->vbus, DRV_MOTOR_V_BASE);                break;
+        case 0x08: value = mcl_to_physical(mcl_get_speed_rad_s(&dm->motor), DRV_MOTOR_W_BASE) * 9.5492966f / (float)mcl_get_pole_pairs(&dm->motor); break; /* speed_rpm */
+        case 0x09: value = mcl_to_physical(mcl_get_speed_rad_s(&dm->motor), DRV_MOTOR_W_BASE) * 9.5492966f / (float)mcl_get_pole_pairs(&dm->motor); break;
+        case 0x0A: value = mcl_to_physical(mcl_get_phase_rad(&dm->motor), DRV_MOTOR_ANGLE_BASE);           break;
+        case 0x0B: value = mcl_to_physical(mcl_get_phase_rad(&dm->motor), DRV_MOTOR_ANGLE_BASE);           break;
+        case 0x0C: value = mcl_to_physical(mcl_get_iq_now(&dm->motor), DRV_MOTOR_I_BASE);              break;
+        case 0x0D: value = mcl_to_physical(mcl_get_iq_now(&dm->motor), DRV_MOTOR_I_BASE);              break;
+        case 0x0E: value = mcl_to_physical(mcl_get_id_now(&dm->motor), DRV_MOTOR_I_BASE);              break;
+        case 0x0F: value = mcl_to_physical(mcl_get_id_now(&dm->motor), DRV_MOTOR_I_BASE);              break;
+        case 0x10: value = mcl_to_physical(mcl_get_vbus(&dm->motor), DRV_MOTOR_V_BASE);                break;
+        case 0x11: value = mcl_to_physical(mcl_get_vbus(&dm->motor), DRV_MOTOR_V_BASE);                break;
         case 0x12: value = dm->cap_post_lam;                 break; /* 复用：切换后观测器角 rad（原 ibus 恒 0） */
         case 0x13: value = dm->cap_post_lam;                 break;
-        case 0x14: value = mcl_to_physical(m->duty_now, 1.0f);            break;
-        case 0x15: value = mcl_to_physical(m->duty_now, 1.0f);            break;
+        case 0x14: value = mcl_to_physical(mcl_get_duty_now(&dm->motor), 1.0f);            break;
+        case 0x15: value = mcl_to_physical(mcl_get_duty_now(&dm->motor), 1.0f);            break;
         case 0x16: value = dm->cap_in_prev1;                 break; /* 复用：拖动倒数第二拍 PLL 输入角 rad */
         case 0x17: value = dm->cap_in_prev1;                 break;
         case 0x18: value = dm->cap_in_prev2;                 break; /* 复用：拖动倒数第三拍 PLL 输入角 rad */
         case 0x19: value = dm->cap_in_prev2;                 break;
-        case 0x1A: value = mcl_to_physical(m->phase_rad, DRV_MOTOR_ANGLE_BASE);           break; /* est_phase 观测器相位 */
-        case 0x1B: value = mcl_to_physical(m->phase_rad, DRV_MOTOR_ANGLE_BASE);           break;
-        case 0x1C: value = mcl_to_physical(m->speed_rad_s, DRV_MOTOR_W_BASE);         break; /* est_speed */
-        case 0x1D: value = mcl_to_physical(m->speed_rad_s, DRV_MOTOR_W_BASE);         break;
-        case 0x1E: value = mcl_to_physical(m->iq_ref, DRV_MOTOR_I_BASE);              break;
-        case 0x1F: value = mcl_to_physical(m->iq_ref, DRV_MOTOR_I_BASE);              break;
-        case 0x20: value = mcl_to_physical(m->speed_ref_rpm, DRV_MOTOR_RPM_BASE);       break;
-        case 0x21: value = mcl_to_physical(m->speed_ref_rpm, DRV_MOTOR_RPM_BASE);       break;
+        case 0x1A: value = mcl_to_physical(mcl_get_phase_rad(&dm->motor), DRV_MOTOR_ANGLE_BASE);           break; /* est_phase 观测器相位 */
+        case 0x1B: value = mcl_to_physical(mcl_get_phase_rad(&dm->motor), DRV_MOTOR_ANGLE_BASE);           break;
+        case 0x1C: value = mcl_to_physical(mcl_get_speed_rad_s(&dm->motor), DRV_MOTOR_W_BASE);         break; /* est_speed */
+        case 0x1D: value = mcl_to_physical(mcl_get_speed_rad_s(&dm->motor), DRV_MOTOR_W_BASE);         break;
+        case 0x1E: value = mcl_to_physical(mcl_get_iq_ref(&dm->motor), DRV_MOTOR_I_BASE);              break;
+        case 0x1F: value = mcl_to_physical(mcl_get_iq_ref(&dm->motor), DRV_MOTOR_I_BASE);              break;
+        case 0x20: value = mcl_to_physical(mcl_get_speed_ref_rpm(&dm->motor), DRV_MOTOR_RPM_BASE);       break;
+        case 0x21: value = mcl_to_physical(mcl_get_speed_ref_rpm(&dm->motor), DRV_MOTOR_RPM_BASE);       break;
         case 0x22: value = dm->cap_pre_est;                  break; /* 复用：切换前帧角 rad（原 openloop_mag） */
         case 0x23: value = dm->cap_pre_est;                  break;
         case 0x24: value = dm->cap_pre_lam;                  break; /* 复用：切换前观测器角 rad */
         case 0x25: value = dm->cap_pre_lam;                  break;
         case 0x26: value = dm->cap_post_est;                 break; /* 复用：切换后帧角 rad（原 openloop_angle） */
         case 0x27: value = dm->cap_post_est;                 break;
-        case 0x28: value = mcl_to_physical(m->v_alpha_prev, 1.0f);        break;
-        case 0x29: value = mcl_to_physical(m->v_alpha_prev, 1.0f);        break;
-        case 0x2A: value = mcl_to_physical(m->v_beta_prev, 1.0f);         break;
-        case 0x2B: value = mcl_to_physical(m->v_beta_prev, 1.0f);         break;
+        case 0x28: value = mcl_to_physical(mcl_get_v_alpha_prev(&dm->motor), 1.0f);        break;
+        case 0x29: value = mcl_to_physical(mcl_get_v_alpha_prev(&dm->motor), 1.0f);        break;
+        case 0x2A: value = mcl_to_physical(mcl_get_v_beta_prev(&dm->motor), 1.0f);         break;
+        case 0x2B: value = mcl_to_physical(mcl_get_v_beta_prev(&dm->motor), 1.0f);         break;
         case 0x2C: value = dm->ia_now;                     break; /* 复用：A 相电流 A（原 fault_current） */
         case 0x2D: value = dm->ia_now;                     break;
         case 0x2E: value = dm->ib_now;                     break; /* 复用：B 相电流 A（原 fault_voltage） */

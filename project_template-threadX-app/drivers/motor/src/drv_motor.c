@@ -699,20 +699,3 @@ int drv_motor_get_telemetry(struct drv_motor *self, mcl_telemetry *out)
 
     return 0;
 }
-
-int drv_motor_get_diagnostics(const struct drv_motor *self, mcl_diagnostics *motor,
-                              mcl_observer_smo_diagnostics *observer)
-{
-    uint32_t irq_mask;
-    int result;
-    if (self == NULL || motor == NULL || observer == NULL) { return -1; }
-    irq_mask = __get_PRIMASK();
-    __disable_irq();
-    result = mcl_get_diagnostics(&self->motor, motor);
-    if (result == MCL_OK)
-    {
-        result = mcl_observer_smo_get_diagnostics(&self->observer, observer);
-    }
-    __set_PRIMASK(irq_mask);
-    return result == MCL_OK ? 0 : -1;
-}

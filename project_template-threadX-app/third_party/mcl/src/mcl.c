@@ -976,38 +976,6 @@ int mcl_get_config(mcl *self, mcl_config *out)
     return MCL_OK;
 }
 
-int mcl_get_diagnostics(const mcl *self, mcl_diagnostics *out)
-{
-    if (self == NULL || out == NULL) { return MCL_ERR_PARAM; }
-    out->state = self->state;
-    out->mode = self->mode;
-    out->ctrl_mode = self->ctrl_mode;
-    out->tick_count = self->tick_count;
-    out->ol_stage = self->ol_stage;
-    out->phase_rad = self->phase_rad;
-    out->speed_rad_s = self->speed_rad_s;
-    out->iq_now = self->iq_now;
-    out->id_now = self->id_now;
-    out->iq_ref = self->iq_ref;
-    out->speed_ref_rpm = self->speed_ref_rpm;
-    out->vbus = self->vbus;
-    out->duty_now = self->duty_now;
-    out->v_alpha_prev = self->v_alpha_prev;
-    out->v_beta_prev = self->v_beta_prev;
-    out->pos_ref_rad = self->pos_ref_rad;
-    out->openloop_mag = self->openloop_mag;
-    out->openloop_speed = self->openloop_speed;
-    out->openloop_angle = self->openloop_angle;
-    out->fault = mcl_protection_get_fault(&self->protection);
-    out->pole_pairs = self->cfg.pole_pairs;
-#ifndef MCL_DISABLE_OBSERVER
-    out->pll_last_phase = self->pll.last_phase;
-#else
-    out->pll_last_phase = 0;
-#endif
-    return MCL_OK;
-}
-
 int mcl_get_current_offsets(const mcl *self, mcl_scalar out[3])
 {
     if (self == NULL || out == NULL) { return MCL_ERR_PARAM; }
@@ -1290,7 +1258,7 @@ int mcl_set_openloop_align(mcl *self, mcl_scalar current, mcl_scalar phase_rad)
 
 /* ============================ 查询 ============================ */
 
-int mcl_get_state(mcl *self, mcl_state *out)
+int mcl_get_state(const mcl *self, mcl_state *out)
 {
     if (self == NULL || out == NULL)
     {
@@ -1300,7 +1268,7 @@ int mcl_get_state(mcl *self, mcl_state *out)
     return MCL_OK;
 }
 
-int mcl_get_fault(mcl *self, mcl_fault *out)
+int mcl_get_fault(const mcl *self, mcl_fault *out)
 {
     if (self == NULL || out == NULL)
     {

@@ -11,7 +11,6 @@ int main(void)
     mcl_observer_smo observer;
     mcl_observer_smo_params op, observed;
     mcl_motor_parameters params, original, readback;
-    mcl_diagnostics diag;
     mcl_observer_smo_diagnostics obs_diag;
     mcl_protection_status status = {0}, status_copy;
     mcl_scalar offsets[3];
@@ -56,22 +55,17 @@ int main(void)
     status.drv_fault = 0;
     assert(mcl_get_protection_status(&motor, &status_copy) == MCL_OK && status_copy.drv_fault == 1);
     assert(mcl_set_speed(&motor, MCL_CONFIG_VALUE(800.0f, DRV_MOTOR_RPM_BASE)) == MCL_OK);
-    assert(mcl_get_diagnostics(&motor, &diag) == MCL_OK);
-    assert(diag.speed_ref_rpm == MCL_CONFIG_VALUE(800.0f, DRV_MOTOR_RPM_BASE));
-    diag.speed_ref_rpm = 0;
-    assert(mcl_get_diagnostics(&motor, &diag) == MCL_OK && diag.speed_ref_rpm != 0);
+    assert(mcl_get_speed_ref_rpm(&motor) == MCL_CONFIG_VALUE(800.0f, DRV_MOTOR_RPM_BASE));
     assert(mcl_observer_smo_get_diagnostics(&observer, &obs_diag) == MCL_OK && obs_diag.phase == 0);
     /* Single-value accessors preserve command units and physical-second timers. */
     assert(mcl_get_ctrl_mode(&motor) == MCL_CTRL_SPEED);
     assert(mcl_get_speed_ref_rpm(&motor) == MCL_CONFIG_VALUE(800.0f, DRV_MOTOR_RPM_BASE));
-    assert(mcl_get_iq_now(&motor) == diag.iq_now);
+    assert(mcl_get_iq_now(&motor) == (mcl_scalar)0);
     assert(mcl_get_dt(&motor) > 0);
     assert(mcl_get_ol_timer(&motor) == 0.0f);
     assert(mcl_get_tick_count(&motor) == 0u);
     assert(mcl_start(&motor) == MCL_OK);
     assert(mcl_set_motor_parameters(&motor, &original) == MCL_ERR_STATE);
-    assert(mcl_get_diagnostics(&motor, &diag) == MCL_OK && diag.state == MCL_STATE_RUN);
-    assert(mcl_get_diagnostics(NULL, &diag) == MCL_ERR_PARAM);
     assert(mcl_get_current_offsets(&motor, NULL) == MCL_ERR_PARAM);
     assert(mcl_set_motor_parameters(NULL, &original) == MCL_ERR_PARAM);
     puts("Host API: copy semantics, validation, stopped-only setter and cache synchronization PASS");

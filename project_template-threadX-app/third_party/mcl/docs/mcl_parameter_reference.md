@@ -18,7 +18,7 @@
 | O | `mcl_get_current_offsets()` | `mcl_calibrate_offset()`；停机校准；或初始化时填写 |
 | S | `mcl_observer_smo_get_params()` | `mcl_observer_smo_set_params()`；观测器停用时，与 update 串行化 |
 
-库 getter 不自动屏蔽中断。读取多字段快照或更新参数时由宿主保证一致性；本工程的 `drv_motor_get_diagnostics()` 封装了电机与 SMO 快照的临界区。不要把 getter 返回的副本修改误认为已经修改了电机。
+库 getter 不自动屏蔽中断。读取多字段快照或更新参数时由宿主保证一致性；本工程监控已按寄存器调用单值 getter，不提供整帧快照。不要把 getter 返回的副本修改误认为已经修改了电机。
 
 ## 2. 类型、单位和基值
 
@@ -222,7 +222,7 @@ S 接口校验有限数值，R≥0、Lq>0、0≤Ld≤Lq、flux>0、gain>0、boun
 | PID | `params`；`i_term/prev_error/prev_out`；定点 `aw_remainder/aw_tracking_remainder` | 参数来自 cfg 三组 PID；状态分别为输出单位、误差单位、输出单位和内部余数；无宿主积分项 setter |
 | FOC | `pid_d/pid_q/mtpa_fw/phase_resistance/phase_inductance` | 从 cfg 初始化；参数通过 C/M 同步；不要直接改嵌套实例 |
 | MTPA/弱磁 | `ld/lq/lambda/i_max/fw_id_min` | H、H、Wb、A、A（定点按对应基值）；初始化 `fw_id_min=-i_max`，板级初始 −4 A；无独立宿主限值 setter |
-| PLL | `kp/ki/phase/speed/last_phase/speed_est_fast` | 增益取 cfg；角为 rad/圈、速度为电气 rad/s/标幺；Q15 另有积分余数；`pll_last_phase` 可从电机 diagnostics 读 |
+| PLL | `kp/ki/phase/speed/last_phase/speed_est_fast` | 增益取 cfg；角为 rad/圈、速度为电气 rad/s/标幺；Q15 另有积分余数；`pll_last_phase` 可从电机单值 getter 读 |
 | Flux | 参数 `lambda/resistance/inductance/gain/ld`；状态 `x1/x2/lambda_est/i_alpha_last/i_beta_last` | 磁链、电阻、电感按对应基值；gain 为磁链幅值校正增益，0 关闭校正；当前板未使用，无成对宿主参数 getter/setter |
 | Ortega | 同类电机参数；磁链状态、电流历史和 `r_est/r_est_state/speed` | 当前板未使用；通过其初始化接口传参数，没有完整宿主参数访问对 |
 | BLDC | `step/hall_map[8]/invert/bemf_integrator/bemf_threshold` | 换相步、霍尔映射、方向、反电动势积分及阈值；当前板 FOC 路径不用，无完整宿主参数访问对 |
@@ -236,31 +236,31 @@ S 接口校验有限数值，R≥0、Lq>0、0≤Ld≤Lq、flux>0、gain>0、boun
 
 ## 6. 电机运行状态、指令与诊断
 
-**接口更新：** 以下电机运行状态的全部 37 个字段均已有独立 `mcl_get_<字段名>()`，直接返回原类型；例如 `mcl_get_avs_scale()`、`mcl_get_iq_applied()`、`mcl_get_ol_timer()`。下表描述原有批量接口的覆盖情况；标为内部的运行字段现在也能通过单值 getter 读取。完整列表及并发约定见 [host_api.md](host_api.md#逐变量运行状态-getter)。
+**接口更新：** 以下电机运行状态的全部 37 个字段均已有独立 `mcl_get_<字段名>()`，直接返回原类型；例如 `mcl_get_avs_scale()`、`mcl_get_iq_applied()`、`mcl_get_ol_timer()`。下表运行字段通过同名单值 getter 读取；标为内部表示由算法维护，不能直接写入。完整列表及并发约定见 [host_api.md](host_api.md#逐变量运行状态-getter)。
 
 | 状态字段/数据组 | 意义 | 访问方式 |
 |---|---|---|
-| `state/fault` | IDLE/ALIGN/RUN/FAULT；当前故障 | `mcl_get_state/get_fault()` 或 diagnostics |
-| `mode/ctrl_mode` | 有感/无感/BLDC；电流/速度/位置/VF/IF/ALIGN 控制 | diagnostics；`mcl_set_mode()` 和各指令 setter |
-| `iq_ref` | 当前 q 轴参考，A/标幺；未必等于最终限流后的值 | diagnostics；`mcl_set_current()` 或其他控制环生成 |
-| `speed_ref_rpm/pos_ref_rad` | 最终速度目标、位置目标 | diagnostics；`mcl_set_speed/set_position()` |
+| `state/fault` | IDLE/ALIGN/RUN/FAULT；当前故障 | `mcl_get_state/get_fault()` 或单值 getter |
+| `mode/ctrl_mode` | 有感/无感/BLDC；电流/速度/位置/VF/IF/ALIGN 控制 | 单值 getter；`mcl_set_mode()` 和各指令 setter |
+| `iq_ref` | 当前 q 轴参考，A/标幺；未必等于最终限流后的值 | 单值 getter；`mcl_set_current()` 或其他控制环生成 |
+| `speed_ref_rpm/pos_ref_rad` | 最终速度目标、位置目标 | 单值 getter；`mcl_set_speed/set_position()` |
 | `speed_ramp_rpm` | 斜坡后的速度目标 | 单值 getter |
-| `phase_rad/speed_rad_s` | 控制使用的电角度、电气角速度 | diagnostics/telemetry |
+| `phase_rad/speed_rad_s` | 控制使用的电角度、电气角速度 | 单值 getter/telemetry |
 | `fb_speed_filt` | 速度环滤波反馈 | 内部 |
-| `id_now/iq_now` | dq 实测电流，A/标幺 | diagnostics/telemetry |
+| `id_now/iq_now` | dq 实测电流，A/标幺 | 单值 getter/telemetry |
 | `id_cmd` | MTPA d 轴指令斜坡 | 内部 |
-| `vbus/duty_now` | 实测母线、调制输出量 | diagnostics/telemetry |
-| `v_alpha_prev/v_beta_prev` | 上拍由最终 duty 重建的电压调制量，按 Vbus/2 归一化 | diagnostics；不是 V/V_BASE |
+| `vbus/duty_now` | 实测母线、调制输出量 | 单值 getter/telemetry |
+| `v_alpha_prev/v_beta_prev` | 上拍由最终 duty 重建的电压调制量，按 Vbus/2 归一化 | 单值 getter；不是 V/V_BASE |
 | `avs_scale` | 当前允许回馈比例 0..1 | 单值 getter |
 | `avs_recovery_step/speed_aw_gain` | 每电流拍恢复量、每速度拍回算比例 | 内部，由配置计算 |
 | `iq_applied` | AVS/温度限制后实际应用 Iq | 单值 getter |
-| `openloop_speed/openloop_angle/openloop_mag` | 开环速度、相位、幅值；VF 幅值为调制量，IF/ALIGN 为电流 | diagnostics；`mcl_set_openloop_vf/if/align()` |
+| `openloop_speed/openloop_angle/openloop_mag` | 开环速度、相位、幅值；VF 幅值为调制量，IF/ALIGN 为电流 | 单值 getter；`mcl_set_openloop_vf/if/align()` |
 | `openloop_phase` | 固定对齐相位 | 内部，由 align 指令设置 |
 | `ol_speed/ol_phase` | 自动启动的速度与相位 | 内部 |
-| `ol_stage/ol_started_once` | 启动阶段、已启动标记 | diagnostics 提供 ol_stage；其他内部 |
+| `ol_stage/ol_started_once` | 启动阶段、已启动标记 | 单值 getter |
 | `ol_timer/ol_hyst_timer/ol_anchor_timer/ol_lock_timer/ol_wait_timer` | 启动、迟滞、锚定和收敛计时 | 内部，float 物理秒 |
 | `switch_blend_timer/switch_blend_iq0/switch_phase_offset` | 闭环交接时间、电流起点、角度偏差 | 内部；秒、电流、角度 |
-| `tick_count/dt` | tick 计数、积分步长 | diagnostics 提供计数；`mcl_get_control_frequency()` 查询频率 |
+| `tick_count/dt` | tick 计数、积分步长 | 单值 getter 提供计数；`mcl_get_control_frequency()` 查询频率 |
 
 `mcl_get_telemetry()` 的当前实现限制：`position_rad` 实际返回控制电角度，不是机械多圈位置；`ibus/temp_motor/temp_fet` 当前填 0，不能解释成真实测量值；`est_phase` 返回控制相位，不是独立的原始 SMO 相位。查看原始 SMO 输出应使用 SMO diagnostics。
 
@@ -344,23 +344,6 @@ S 接口校验有限数值，R≥0、Lq>0、0≤Ld≤Lq、flux>0、gain>0、boun
 | 字段声明 / 编译条件 |
 |---|
 | `mcl_scalar phase_resistance, phase_inductance, ld_lq_diff, bemf_const;` |
-
-### `mcl_diagnostics`
-
-来源：[mcl.h](../include/mcl.h)
-
-| 字段声明 / 编译条件 |
-|---|
-| `mcl_state state;` |
-| `mcl_fault fault;` |
-| `mcl_mode mode;` |
-| `mcl_ctrl_mode ctrl_mode;` |
-| `uint32_t tick_count;` |
-| `uint8_t ol_stage;` |
-| `uint32_t pole_pairs;` |
-| `mcl_scalar phase_rad, speed_rad_s, iq_now, id_now, iq_ref, speed_ref_rpm;` |
-| `mcl_scalar vbus, duty_now, v_alpha_prev, v_beta_prev, pll_last_phase;` |
-| `mcl_scalar pos_ref_rad, openloop_mag, openloop_speed, openloop_angle;` |
 
 ### `mcl_bldc_comm`
 

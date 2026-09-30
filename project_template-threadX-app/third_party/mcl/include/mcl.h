@@ -113,6 +113,17 @@ typedef struct
     uint32_t tick_count;        /**< 控制周期计数（分频用） */
 } mcl;
 
+/* Initialized, non-NULL instance required; no conversion or locking. */
+static inline mcl_mode mcl_get_mode(const mcl *self)
+{
+    return self->mode;
+}
+
+static inline uint8_t mcl_get_pole_pairs(const mcl *self)
+{
+    return self->cfg.pole_pairs;
+}
+
 /* ============================ Single-value runtime getters ============================ */
 /* self must point to an initialized instance (not NULL).
  * Return values retain their stored type and physical/per-unit basis.
@@ -370,21 +381,6 @@ typedef struct
     mcl_scalar phase_resistance, phase_inductance, ld_lq_diff, bemf_const;
 } mcl_motor_parameters;
 
-typedef struct
-{
-    mcl_state state;
-    mcl_fault fault;
-    mcl_mode mode;
-    mcl_ctrl_mode ctrl_mode;
-    uint32_t tick_count;
-    uint8_t ol_stage;
-    uint32_t pole_pairs;
-    mcl_scalar phase_rad, speed_rad_s, iq_now, id_now, iq_ref, speed_ref_rpm;
-    mcl_scalar vbus, duty_now, v_alpha_prev, v_beta_prev, pll_last_phase;
-    mcl_scalar pos_ref_rad, openloop_mag, openloop_speed, openloop_angle;
-} mcl_diagnostics;
-
-int mcl_get_diagnostics(const mcl *self, mcl_diagnostics *out);
 int mcl_get_current_offsets(const mcl *self, mcl_scalar out[3]);
 int mcl_get_control_frequency(const mcl *self, uint32_t *out);
 int mcl_get_motor_parameters(const mcl *self, mcl_motor_parameters *out);
@@ -504,7 +500,7 @@ int mcl_set_openloop_align(mcl *self, mcl_scalar current, mcl_scalar phase_rad);
  * @param out  状态（输出）
  * @return MCL_OK / MCL_ERR_PARAM
  */
-int mcl_get_state(mcl *self, mcl_state *out);
+int mcl_get_state(const mcl *self, mcl_state *out);
 
 /**
  * @brief 查询当前故障
@@ -512,7 +508,7 @@ int mcl_get_state(mcl *self, mcl_state *out);
  * @param out  故障码（输出）
  * @return MCL_OK / MCL_ERR_PARAM
  */
-int mcl_get_fault(mcl *self, mcl_fault *out);
+int mcl_get_fault(const mcl *self, mcl_fault *out);
 
 /**
  * @brief 查询故障现场快照（关断时刻的电流/电压/转速/温度）
